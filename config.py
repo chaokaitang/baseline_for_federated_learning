@@ -1,0 +1,22 @@
+# GLOBAL PARAMETERS
+DATASETS = ['mnist', ]
+TRAINERS = {'fedavg': 'FedAvgTrainer',}
+OPTIMIZERS = TRAINERS.keys()
+
+class ModelConfig(object):
+    def __init__(self):
+        pass
+
+    def __call__(self, dataset, model):
+        dataset = dataset.split('_')[0]
+        if dataset == 'mnist' or dataset == 'nist':
+            if model == 'logistic' or model == '2nn':
+                return {'input_shape': 784, 'num_class': 10}
+            else:
+                return {'input_shape': (1, 28, 28), 'num_class': 10}
+
+        else:
+            raise ValueError('Not support dataset {}!'.format(dataset))
+
+
+MODEL_PARAMS = ModelConfig()

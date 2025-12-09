@@ -107,8 +107,8 @@ class BaseTrainer(object):
             # Communicate the latest model
             c.set_flat_model_params(self.latest_model)
 
-            # Solve minimization locally
-            soln, stat = c.local_train()
+            # Solve minimization locally (pass through optional kwargs)
+            soln, stat = c.local_train(**kwargs)
             if self.print_result:
                 print("Round: {:>2d} | CID: {: >3d} ({:>2d}/{:>2d})| "
                       "Param: norm {:>.4f} ({:>.4f}->{:>.4f})| "

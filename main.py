@@ -68,6 +68,10 @@ def read_options():
                         help='learning rate for inner solver;',
                         type=float,
                         default=0.1)
+    parser.add_argument('--mu',
+                        help='FedProx proximal term coefficient (mu);',
+                        type=float,
+                        default=0.5)
     parser.add_argument('--seed',
                         help='seed for randomness;',
                         type=int,

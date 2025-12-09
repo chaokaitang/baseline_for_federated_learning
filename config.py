@@ -1,6 +1,6 @@
 # GLOBAL PARAMETERS
 DATASETS = ['mnist', ]
-TRAINERS = {'fedavg': 'FedAvgTrainer',}
+TRAINERS = {'fedavg': 'FedAvgTrainer', 'fedprox': 'FedProxTrainer',}
 OPTIMIZERS = TRAINERS.keys()
 
 class ModelConfig(object):

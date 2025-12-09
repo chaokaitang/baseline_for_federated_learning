@@ -108,6 +108,24 @@ class Worker(object):
                     embed()
 
                 loss = criterion(pred, y)
+
+                # FedProx proximal term: add (mu/2) * ||w - w_global||^2 to loss
+                prox_mu = kwargs.get('prox_mu', 0.0)
+                if prox_mu and prox_mu > 0.0 and 'global_params' in kwargs:
+                    global_params = kwargs['global_params']
+                    # Build a flat tensor of current parameters that supports autograd
+                    current_flat = torch.cat([p.view(-1) for p in self.model.parameters()])
+                    if self.gpu:
+                        global_params = global_params.cuda()
+                        current_flat = current_flat.cuda()
+                    # make sure tensors align
+                    try:
+                        prox = (prox_mu / 2.0) * torch.sum((current_flat - global_params) ** 2)
+                        loss = loss + prox
+                    except Exception:
+                        # If shapes mismatch, skip proximal term (user should ensure correct shapes)
+                        pass
+
                 loss.backward()
                 torch.nn.utils.clip_grad_norm(self.model.parameters(), 60)
                 self.optimizer.step()

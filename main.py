@@ -72,6 +72,10 @@ def read_options():
                         help='FedProx proximal term coefficient (mu);',
                         type=float,
                         default=0.5)
+    parser.add_argument('--lambda_p',
+                        help='Ditto personalization regularizer (lambda_p);',
+                        type=float,
+                        default=0.1)
     parser.add_argument('--seed',
                         help='seed for randomness;',
                         type=int,

@@ -142,6 +142,13 @@ class Metrics(object):
         # Statistics in test procedure
         self.loss_on_eval_data = [0] * num_rounds
         self.acc_on_eval_data = [0] * num_rounds
+        # Personalized model stats: dict(cid -> list per round)
+        self.personalized_loss_on_eval = {c.cid: [0] * num_rounds for c in clients}
+        self.personalized_acc_on_eval = {c.cid: [0] * num_rounds for c in clients}
+        # Aggregated personalized stats across clients (per round)
+        self.personalized_mean_loss = [0] * num_rounds
+        self.personalized_mean_acc = [0] * num_rounds
+        self.personalized_std_acc = [0] * num_rounds
 
         self.result_path = mkdir(os.path.join('./result', self.options['dataset']))
         suffix = '{}_sd{}_lr{}_ep{}_bs{}_{}'.format(name,
@@ -191,6 +198,62 @@ class Metrics(object):
         self.eval_writer.add_scalar('test_loss', eval_stats['loss'], round_i)
         self.eval_writer.add_scalar('test_acc', eval_stats['acc'], round_i)
 
+    def update_personalized_eval_stats(self, round_i, cid, loss, acc):
+        """Record personalized model evaluation for a single client at a given round."""
+        if cid not in self.personalized_loss_on_eval:
+            # initialize list if unseen
+            num_rounds = self.options['num_round'] + 1
+            self.personalized_loss_on_eval[cid] = [0] * num_rounds
+            self.personalized_acc_on_eval[cid] = [0] * num_rounds
+
+        self.personalized_loss_on_eval[cid][round_i] = loss
+        self.personalized_acc_on_eval[cid][round_i] = acc
+
+        # Write scalar to tensorboard under a per-client tag
+        self.eval_writer.add_scalar(f'personalized/test_loss/client_{cid}', loss, round_i)
+        self.eval_writer.add_scalar(f'personalized/test_acc/client_{cid}', acc, round_i)
+
+    def update_personalized_aggregate(self, round_i, losses_list, accs_list):
+        """Record aggregated personalized metrics (mean and std over clients) for this round.
+
+        losses_list, accs_list: lists of per-client loss/acc (floats)
+        """
+        if len(losses_list) == 0:
+            mean_loss = 0.0
+        else:
+            mean_loss = float(np.mean(losses_list))
+        if len(accs_list) == 0:
+            mean_acc = 0.0
+            std_acc = 0.0
+        else:
+            mean_acc = float(np.mean(accs_list))
+            std_acc = float(np.std(accs_list))
+
+        self.personalized_mean_loss[round_i] = mean_loss
+        self.personalized_mean_acc[round_i] = mean_acc
+        self.personalized_std_acc[round_i] = std_acc
+
+        # write to tensorboard for easy visualization
+        self.eval_writer.add_scalar('personalized/mean_test_loss', mean_loss, round_i)
+        self.eval_writer.add_scalar('personalized/mean_test_acc', mean_acc, round_i)
+        self.eval_writer.add_scalar('personalized/std_test_acc', std_acc, round_i)
+        # Also write combined charts comparing global vs personalized on the same plot
+        try:
+            global_acc = self.acc_on_eval_data[round_i] if len(self.acc_on_eval_data) > round_i else 0.0
+            global_loss = self.loss_on_eval_data[round_i] if len(self.loss_on_eval_data) > round_i else 0.0
+            # comparison chart for accuracy (two series in one plot)
+            self.eval_writer.add_scalars('comparison/test_acc',
+                                         {'global': float(global_acc), 'personalized': float(mean_acc)},
+                                         round_i)
+            # comparison chart for loss
+            self.eval_writer.add_scalars('comparison/test_loss',
+                                         {'global': float(global_loss), 'personalized': float(mean_loss)},
+                                         round_i)
+            # Also add single-series scalars for compatibility with simple names
+        except Exception:
+            # if add_scalars not supported by writer implementation, ignore
+            pass
+
     def write(self):
         metrics = dict()
 
@@ -209,6 +272,12 @@ class Metrics(object):
 
         metrics['loss_on_eval_data'] = self.loss_on_eval_data
         metrics['acc_on_eval_data'] = self.acc_on_eval_data
+        metrics['personalized_mean_loss'] = self.personalized_mean_loss
+        metrics['personalized_mean_acc'] = self.personalized_mean_acc
+        metrics['personalized_std_acc'] = self.personalized_std_acc
+
+        metrics['personalized_loss_on_eval'] = self.personalized_loss_on_eval
+        metrics['personalized_acc_on_eval'] = self.personalized_acc_on_eval
 
         # Dict(key=cid, value=list(stats for each round))
         metrics['client_computations'] = self.client_computations

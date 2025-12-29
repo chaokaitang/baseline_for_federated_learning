@@ -76,6 +76,10 @@ def read_options():
                         help='Ditto personalization regularizer (lambda_p);',
                         type=float,
                         default=0.1)
+    parser.add_argument('--eta',
+                        help='pFedMe personal model inner-step size (eta);',
+                        type=float,
+                        default=0.5)
     parser.add_argument('--seed',
                         help='seed for randomness;',
                         type=int,
@@ -84,6 +88,10 @@ def read_options():
                         help='add more information;',
                         type=str,
                         default='')
+    parser.add_argument('--server_beta',
+                        help='pFedMe server model mixing parameter (server_beta);',
+                        type=float,
+                        default=0.5)
     parsed = parser.parse_args()
     options = parsed.__dict__
     options['gpu'] = options['gpu'] and torch.cuda.is_available()

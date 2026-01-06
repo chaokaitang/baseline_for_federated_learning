@@ -142,6 +142,119 @@ def main():
     trainer = trainer_class(options, all_data_info)
     trainer.train()
 
+    # After training, evaluate the final global model on each client's local test set
+    try:
+        import json
+        import matplotlib.pyplot as plt
+
+        result_dir = os.path.join(trainer.metrics.result_path, trainer.metrics.exp_name)
+        os.makedirs(result_dir, exist_ok=True)
+
+        print('>>> Evaluating final global model on each client test set...')
+        client_acc = {}
+        classes_per_client = {}
+        top1_frac = {}
+        label_entropy = {}
+
+        for c in trainer.clients:
+            # Ensure worker has the final global model
+            c.set_flat_model_params(trainer.latest_model)
+            tot_correct, num_sample, loss = c.local_test(use_eval_data=True)
+            acc = float(tot_correct) / float(num_sample) if num_sample > 0 else 0.0
+            client_acc[int(c.cid)] = acc
+
+            # Training label distribution (from client's MiniDataset)
+            try:
+                labels = c.train_data.labels
+            except Exception:
+                labels = None
+
+            if labels is not None and len(labels) > 0:
+                vals, counts = np.unique(labels, return_counts=True)
+                classes_per_client[int(c.cid)] = int(len(vals))
+                probs = counts.astype('float64') / counts.sum()
+                top1 = probs.max()
+                top1_frac[int(c.cid)] = float(top1)
+                # entropy
+                ent = -np.sum([p * np.log(p + 1e-12) for p in probs])
+                label_entropy[int(c.cid)] = float(ent)
+            else:
+                classes_per_client[int(c.cid)] = 0
+                top1_frac[int(c.cid)] = 0.0
+                label_entropy[int(c.cid)] = 0.0
+
+        # Save client accuracies and stats
+        acc_json_path = os.path.join(result_dir, 'client_acc.json')
+        with open(acc_json_path, 'w') as outf:
+            json.dump({'client_acc': client_acc,
+                       'classes_per_client': classes_per_client,
+                       'top1_frac': top1_frac,
+                       'label_entropy': label_entropy}, outf)
+        print(f'>>> Saved per-client accuracy and stats to {acc_json_path}')
+
+        # Also save numpy array of accuracies (ordered by client id)
+        ids_sorted = sorted(client_acc.keys())
+        accs = np.array([client_acc[i] for i in ids_sorted])
+        np.save(os.path.join(result_dir, 'client_acc.npy'), accs)
+
+        # Compute and save statistics for client accuracies
+        stats = dict()
+        if accs.size > 0:
+            stats['mean'] = float(np.mean(accs))
+            stats['std'] = float(np.std(accs))
+            stats['min'] = float(np.min(accs))
+            stats['max'] = float(np.max(accs))
+            p10, p90 = np.percentile(accs, [10, 90])
+            stats['10th_percentile'] = float(p10)
+            stats['90th_percentile'] = float(p90)
+        else:
+            stats['mean'] = stats['std'] = stats['min'] = stats['max'] = 0.0
+            stats['10th_percentile'] = stats['90th_percentile'] = 0.0
+
+        stats_path = os.path.join(result_dir, 'client_acc_stats.json')
+        with open(stats_path, 'w') as sf:
+            import json as _json
+            _json.dump(stats, sf)
+        print('>>> Client accuracy stats:')
+        print(stats)
+
+        # Plot: bar plot by client id
+        plt.figure(figsize=(12, 4))
+        plt.bar(ids_sorted, accs)
+        plt.xlabel('Client ID')
+        plt.ylabel('Accuracy')
+        plt.title('Per-client Test Accuracy (global model)')
+        plt.tight_layout()
+        barpath = os.path.join(result_dir, 'client_acc_bar.png')
+        plt.savefig(barpath, dpi=200)
+        plt.close()
+        print(f'>>> Saved client accuracy bar plot to {barpath}')
+
+        # Plot: sorted accuracy curve
+        plt.figure(figsize=(8, 4))
+        acc_sorted = np.sort(accs)
+        plt.plot(acc_sorted, marker='o')
+        plt.xlabel('Client (sorted)')
+        plt.ylabel('Accuracy')
+        plt.title('Per-client Test Accuracy (sorted)')
+        plt.tight_layout()
+        sortpath = os.path.join(result_dir, 'client_acc_sorted.png')
+        plt.savefig(sortpath, dpi=200)
+        plt.close()
+        print(f'>>> Saved sorted client accuracy plot to {sortpath}')
+
+        # Also save a small JSON bundle with acc and stats for easy external comparison
+        bundle_path = os.path.join(result_dir, 'client_acc_bundle.json')
+        try:
+            with open(bundle_path, 'w') as bf:
+                import json as _json
+                _json.dump({'client_ids': ids_sorted, 'client_acc': accs.tolist(), 'stats': stats}, bf)
+            print(f'>>> Saved client_acc bundle to {bundle_path}')
+        except Exception:
+            pass
+
+    except Exception as e:
+        print(f'Error during post-train per-client evaluation: {e}')
 
 if __name__ == '__main__':
     main()

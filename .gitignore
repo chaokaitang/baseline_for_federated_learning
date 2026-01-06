@@ -1,8 +1,9 @@
 /data/mnist/data
+/data/emnist/data
 /result
 /__pycache__
 /.vscode
 **/__pycache__/
 /project_file
-
-
+*.png
+*.npy

@@ -156,7 +156,7 @@ class Metrics(object):
                                                     options['lr'],
                                                     options['num_epoch'],
                                                     options['batch_size'],
-                                                    'w' if options['noaverage'] else 'a')
+                                                    'w' if options['simple_average'] else 'a')
 
         self.exp_name = '{}_{}_{}_{}'.format(time.strftime('%Y-%m-%dT%H-%M-%S'), options['algo'],
                                              options['model'], suffix)

@@ -1,0 +1,10 @@
+# Requirements for baseline_for_federated_learning
+# Install with: pip install -r requirements.txt
+
+torch>=1.12.0
+torchvision>=0.13.0
+numpy>=1.21.0
+matplotlib>=3.4.0
+seaborn>=0.11.0
+Pillow>=8.2.0
+tensorboardX>=2.5.0

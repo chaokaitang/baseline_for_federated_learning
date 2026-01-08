@@ -18,17 +18,45 @@ def latest_run_folder(dataset_name):
     return entries[0]
 
 
-def load_acc(run_folder):
-    path = os.path.join(run_folder, 'client_acc.npy')
-    if not os.path.exists(path):
-        # try json bundle
-        jpath = os.path.join(run_folder, 'client_acc_bundle.json')
-        if os.path.exists(jpath):
+def load_acc(run_folder, kind='global'):
+    """Load client accuracy array from a run folder.
+
+    kind: 'global' (client_acc.npy) or 'personal' (client_acc_personal.npy)
+    Falls back to 'client_acc_bundle.json' if numpy not present.
+    """
+    if kind == 'personal':
+        filename = 'client_acc_personal.npy'
+        bundle_key = 'client_acc_personal'
+    else:
+        filename = 'client_acc.npy'
+        bundle_key = 'client_acc'
+
+    path = os.path.join(run_folder, filename)
+    if os.path.exists(path):
+        try:
+            return np.load(path)
+        except Exception:
+            pass
+
+    # try json bundle
+    jpath = os.path.join(run_folder, 'client_acc_bundle.json')
+    if os.path.exists(jpath):
+        try:
             with open(jpath, 'r') as f:
                 b = json.load(f)
-            return np.array(b.get('client_acc', []))
-        return None
-    return np.load(path)
+            return np.array(b.get(bundle_key, []))
+        except Exception:
+            return None
+    # try standalone json files
+    jpath2 = os.path.join(run_folder, f'client_acc{"_personal" if kind=="personal" else ""}.json')
+    if os.path.exists(jpath2):
+        try:
+            with open(jpath2, 'r') as f:
+                b = json.load(f)
+            return np.array(list(b.values())[0])
+        except Exception:
+            return None
+    return None
 
 
 def stats_from_acc(accs):
@@ -68,6 +96,9 @@ def main():
 
     non_acc = load_acc(noniid_folder)
     iid_acc = load_acc(iid_folder)
+    # try to load personalized accuracies as well
+    non_acc_personal = load_acc(noniid_folder, kind='personal')
+    iid_acc_personal = load_acc(iid_folder, kind='personal')
 
     if non_acc is None:
         print('Could not find client_acc in non-iid folder:', noniid_folder)
@@ -113,8 +144,34 @@ def main():
     except Exception as e:
         print('Error saving comparison plot:', e)
 
+    # If personalized accuracies are present for both runs, produce personal comparison
+    try:
+        if non_acc_personal is not None and iid_acc_personal is not None:
+            non_sorted_p = np.sort(non_acc_personal)
+            iid_sorted_p = np.sort(iid_acc_personal)
+            plt.figure(figsize=(8, 4))
+            plt.plot(non_sorted_p, marker='o', label='Non-IID (personal)')
+            plt.plot(iid_sorted_p, marker='x', label='IID (personal)')
+            plt.xlabel('Client (sorted)')
+            plt.ylabel('Personalized Accuracy')
+            plt.title('Per-client Personalized Accuracy: Non-IID vs IID (sorted)')
+            plt.legend()
+            plt.tight_layout()
+            tstamp = time.strftime('%Y-%m-%dT%H-%M-%S')
+            outpath_p = os.path.join('result', f'compare_emnist_personal_iid_vs_noniid_{tstamp}.png')
+            os.makedirs(os.path.dirname(outpath_p), exist_ok=True)
+            plt.savefig(outpath_p, dpi=200)
+            plt.close()
+            print('Saved personalized comparison plot to', outpath_p)
+    except Exception as e:
+        print('Error saving personalized comparison plot:', e)
+
     # Print and save stats
     stats = {'non_iid': stats_from_acc(non_acc), 'iid': stats_from_acc(iid_acc)}
+    # include personal stats if available
+    if non_acc_personal is not None and iid_acc_personal is not None:
+        stats['non_iid_personal'] = stats_from_acc(non_acc_personal)
+        stats['iid_personal'] = stats_from_acc(iid_acc_personal)
     print('Statistics:')
     print(stats)
     stats_path = os.path.join('result', f'compare_emnist_stats_{time.strftime("%Y-%m-%dT%H-%M-%S")}.json')

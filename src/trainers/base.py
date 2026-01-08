@@ -26,7 +26,7 @@ class BaseTrainer(object):
         self.num_round = options['num_round']
         self.clients_per_round = options['clients_per_round']
         self.eval_every = options['eval_every']
-        self.simple_average = not options['noaverage']
+        self.simple_average = options['simple_average']
         print('>>> Weigh updates by {}'.format(
             'simple average' if self.simple_average else 'sample numbers'))
 
@@ -133,20 +133,33 @@ class BaseTrainer(object):
             flat global model parameter
         """
 
+        # Initialize averaged_solution on the same shape/device as latest_model
         averaged_solution = torch.zeros_like(self.latest_model)
-        # averaged_solution = np.zeros(self.latest_model.shape)
-        if self.simple_average:
-            num = 0
-            for num_sample, local_solution in solns:
-                num += 1
-                averaged_solution += local_solution
-            averaged_solution /= num
-        else:
-            for num_sample, local_solution in solns:
-                averaged_solution += num_sample * local_solution
-            averaged_solution /= self.all_train_data_num
 
-        # averaged_solution = from_numpy(averaged_solution, self.gpu)
+        # Ensure solns is materialized (solns may be a generator)
+        soln_list = list(solns)
+        if len(soln_list) == 0:
+            return averaged_solution.detach()
+
+        if self.simple_average:
+            # Equal-weight average across selected clients
+            for _, local_solution in soln_list:
+                # make sure tensors are on same device
+                if local_solution.device != averaged_solution.device:
+                    local_solution = local_solution.to(averaged_solution.device)
+                averaged_solution += local_solution
+            averaged_solution /= float(len(soln_list))
+        else:
+            # Weighted average by number of samples among selected clients
+            total_selected_samples = float(sum([float(num_sample) for num_sample, _ in soln_list]))
+            if total_selected_samples == 0:
+                return averaged_solution.detach()
+            for num_sample, local_solution in soln_list:
+                if local_solution.device != averaged_solution.device:
+                    local_solution = local_solution.to(averaged_solution.device)
+                averaged_solution += float(num_sample) * local_solution
+            averaged_solution /= float(total_selected_samples)
+
         return averaged_solution.detach()
 
     def test_latest_model_on_traindata(self, round_i):

@@ -36,10 +36,10 @@ def read_options():
                         action='store_true',
                         default=False,
                         help='whether to print inner result (default: False)')
-    parser.add_argument('--noaverage',
+    parser.add_argument('--simple_average',
                         action='store_true',
                         default=False,
-                        help='whether to only average local solutions (default: True)')
+                        help='whether to average local solutions according to sample numbers (default: False)')
     parser.add_argument('--device',
                         help='selected CUDA device',
                         default=0,
@@ -91,7 +91,7 @@ def read_options():
     parser.add_argument('--server_beta',
                         help='pFedMe server model mixing parameter (server_beta);',
                         type=float,
-                        default=0.5)
+                        default=1.0)
     parsed = parser.parse_args()
     options = parsed.__dict__
     options['gpu'] = options['gpu'] and torch.cuda.is_available()
@@ -252,6 +252,99 @@ def main():
             print(f'>>> Saved client_acc bundle to {bundle_path}')
         except Exception:
             pass
+
+        # If trainer maintains personalized models (Ditto, pFedMe), evaluate and save them too
+        try:
+            if hasattr(trainer, 'personal_models') and isinstance(trainer.personal_models, dict):
+                print('>>> Evaluating personalized models on each client test set...')
+                personal_acc = {}
+                for c in trainer.clients:
+                    # load personalized model if exists, otherwise use latest global
+                    p = trainer.personal_models.get(c.cid, trainer.latest_model)
+                    try:
+                        c.set_flat_model_params(p)
+                        tot_correct, num_sample, loss = c.local_test(use_eval_data=True)
+                        acc = float(tot_correct) / float(num_sample) if num_sample > 0 else 0.0
+                        personal_acc[int(c.cid)] = acc
+                    except Exception:
+                        personal_acc[int(c.cid)] = 0.0
+
+                # Save personal accuracies as json and numpy
+                personal_json_path = os.path.join(result_dir, 'client_acc_personal.json')
+                with open(personal_json_path, 'w') as outf:
+                    json.dump({'client_acc_personal': personal_acc}, outf)
+                print(f'>>> Saved per-client personalized accuracy to {personal_json_path}')
+
+                ids_sorted_p = sorted(personal_acc.keys())
+                accs_p = np.array([personal_acc[i] for i in ids_sorted_p])
+                np.save(os.path.join(result_dir, 'client_acc_personal.npy'), accs_p)
+
+                # Compute and save statistics for personalized accuracies
+                pstats = dict()
+                if accs_p.size > 0:
+                    pstats['mean'] = float(np.mean(accs_p))
+                    pstats['std'] = float(np.std(accs_p))
+                    pstats['min'] = float(np.min(accs_p))
+                    pstats['max'] = float(np.max(accs_p))
+                    p10, p90 = np.percentile(accs_p, [10, 90])
+                    pstats['10th_percentile'] = float(p10)
+                    pstats['90th_percentile'] = float(p90)
+                else:
+                    pstats['mean'] = pstats['std'] = pstats['min'] = pstats['max'] = 0.0
+                    pstats['10th_percentile'] = pstats['90th_percentile'] = 0.0
+
+                pstats_path = os.path.join(result_dir, 'client_acc_personal_stats.json')
+                with open(pstats_path, 'w') as sf:
+                    import json as _json
+                    _json.dump(pstats, sf)
+                print('>>> Personalized client accuracy stats:')
+                print(pstats)
+
+                # Bar plot for personalized accuracies
+                try:
+                    plt.figure(figsize=(12, 4))
+                    plt.bar(ids_sorted_p, accs_p)
+                    plt.xlabel('Client ID')
+                    plt.ylabel('Personalized Accuracy')
+                    plt.title('Per-client Test Accuracy (personalized model)')
+                    plt.tight_layout()
+                    barpath_p = os.path.join(result_dir, 'client_acc_personal_bar.png')
+                    plt.savefig(barpath_p, dpi=200)
+                    plt.close()
+                    print(f'>>> Saved personalized client accuracy bar plot to {barpath_p}')
+                except Exception:
+                    pass
+
+                # Sorted plot for personalized accuracies
+                try:
+                    plt.figure(figsize=(8, 4))
+                    acc_sorted_p = np.sort(accs_p)
+                    plt.plot(acc_sorted_p, marker='o')
+                    plt.xlabel('Client (sorted)')
+                    plt.ylabel('Personalized Accuracy')
+                    plt.title('Per-client Personalized Test Accuracy (sorted)')
+                    plt.tight_layout()
+                    sortpath_p = os.path.join(result_dir, 'client_acc_personal_sorted.png')
+                    plt.savefig(sortpath_p, dpi=200)
+                    plt.close()
+                    print(f'>>> Saved sorted personalized accuracy plot to {sortpath_p}')
+                except Exception:
+                    pass
+
+                # Append personalized info into the bundle if possible
+                try:
+                    with open(bundle_path, 'r') as bf:
+                        bund = json.load(bf)
+                except Exception:
+                    bund = {'client_ids': ids_sorted, 'client_acc': accs.tolist(), 'stats': stats}
+                bund.update({'client_acc_personal': accs_p.tolist(), 'personal_stats': pstats})
+                try:
+                    with open(bundle_path, 'w') as bf:
+                        json.dump(bund, bf)
+                except Exception:
+                    pass
+        except Exception as e:
+            print('Error during personalized model evaluation:', e)
 
     except Exception as e:
         print(f'Error during post-train per-client evaluation: {e}')

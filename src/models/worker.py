@@ -18,6 +18,7 @@ class Worker(object):
         # Basic parameters
         self.model = model
         self.optimizer = optimizer
+        self.options = options
         self.batch_size = options['batch_size']
         self.num_epoch = options['num_epoch']
         self.gpu = options['gpu'] if 'gpu' in options else False
@@ -62,6 +63,31 @@ class Worker(object):
     def set_flat_model_params(self, flat_params):
         set_flat_params_to(self.model, flat_params)
 
+    def _apply_task_aware_logits_labels(self, pred, y):
+        """Apply task-aware logit slicing and label remapping if configured.
+
+        Uses:
+            self.options['active_labels']: list of global labels for current task
+            self.options['label_map']: dict global_label -> local_label
+        """
+        active_labels = self.options.get('active_labels', None)
+        if active_labels is None or len(active_labels) == 0:
+            return pred, y
+
+        # Slice logits to active task label space
+        idx = torch.tensor(active_labels, device=pred.device, dtype=torch.long)
+        pred_sliced = pred.index_select(1, idx)
+
+        # Remap global labels to local labels
+        label_map = self.options.get('label_map', None)
+        if label_map is None:
+            label_map = {int(g): int(i) for i, g in enumerate(active_labels)}
+
+        y_cpu = y.detach().cpu().numpy().tolist()
+        y_local_list = [label_map[int(v)] for v in y_cpu]
+        y_local = torch.tensor(y_local_list, device=pred.device, dtype=torch.long)
+        return pred_sliced, y_local
+
     def get_flat_grads(self, dataloader):
         self.optimizer.zero_grad()
         loss, total_num = 0., 0
@@ -70,6 +96,7 @@ class Worker(object):
             if self.gpu:
                 x, y = x.cuda(), y.cuda()
             pred = self.model(x)
+            pred, y = self._apply_task_aware_logits_labels(pred, y)
             loss += criterion(pred, y) * y.size(0)
             total_num += y.size(0)
         loss /= total_num
@@ -102,8 +129,10 @@ class Worker(object):
 
                 self.optimizer.zero_grad()
                 pred = self.model(x)
+                pred_eval = pred
+                pred, y = self._apply_task_aware_logits_labels(pred, y)
 
-                if torch.isnan(pred.max()):
+                if torch.isnan(pred_eval.max()):
                     from IPython import embed
                     embed()
 
@@ -161,6 +190,7 @@ class Worker(object):
                     x, y = x.cuda(), y.cuda()
 
                 pred = self.model(x)
+                pred, y = self._apply_task_aware_logits_labels(pred, y)
                 loss = criterion(pred, y)
                 _, predicted = torch.max(pred, 1)
                 correct = predicted.eq(y).sum()

@@ -118,6 +118,10 @@ class Worker(object):
         """
         self.model.train()
         train_loss = train_acc = train_total = 0
+        # Optional old-task anchor (sequential CL): L_task + lambda_old * ||w - w_old||^2
+        prev_model = self.options.get('prev_model', None)
+        lambda_old = float(self.options.get('lambda_old', 0.0))
+        printed_reg_once = False
         for epoch in range(self.num_epoch):
             train_loss = train_acc = train_total = 0
             for batch_idx, (x, y) in enumerate(train_dataloader):
@@ -137,6 +141,23 @@ class Worker(object):
                     embed()
 
                 loss = criterion(pred, y)
+
+                # Historical parameter regularization to previous-task global model
+                # Task-1 has no previous model; task2/task3 use previous task snapshot as anchor.
+                if prev_model is not None and lambda_old > 0.0:
+                    try:
+                        current_flat = torch.cat([p.view(-1) for p in self.model.parameters()])
+                        prev_flat = prev_model.detach()
+                        if prev_flat.device != current_flat.device:
+                            prev_flat = prev_flat.to(current_flat.device)
+                        reg_loss_old = torch.sum((current_flat - prev_flat) ** 2)
+                        loss = loss + lambda_old * reg_loss_old
+                        if not printed_reg_once:
+                            print(f'>>> old-model reg enabled: lambda_old={lambda_old}, reg_loss={reg_loss_old.item():.6f}')
+                            printed_reg_once = True
+                    except Exception:
+                        # Keep baseline behavior if shape/device alignment fails
+                        pass
 
                 # FedProx proximal term: add (mu/2) * ||w - w_global||^2 to loss
                 prox_mu = kwargs.get('prox_mu', 0.0)

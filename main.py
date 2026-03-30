@@ -101,6 +101,10 @@ def read_options():
                         help='number of sequential tasks for continual learning',
                         type=int,
                         default=3)
+    parser.add_argument('--lambda_old',
+                        help='L2 regularization coefficient to previous task global model',
+                        type=float,
+                        default=0.0)
     parsed = parser.parse_args()
     options = parsed.__dict__
     options['gpu'] = options['gpu'] and torch.cuda.is_available()
@@ -433,6 +437,112 @@ def _evaluate_global_on_dataset(trainer, dataset_tuple, model_flat, active_label
     }
 
 
+def _regenerate_cl_matrices_from_summary_json(summary_path):
+    """Regenerate visualization matrices from saved sequential CL summary JSON.
+
+    This helps quickly inspect seen-task accuracy and forgetting from saved artifacts.
+    """
+    try:
+        import json
+        import matplotlib.pyplot as plt
+
+        with open(summary_path, 'r') as f:
+            summary = json.load(f)
+
+        acc_mat = np.array(summary.get('eval_acc_matrix', []), dtype=np.float64)
+        if acc_mat.size == 0:
+            print(f'Warning: empty eval_acc_matrix in {summary_path}')
+            return
+
+        num_tasks = acc_mat.shape[0]
+        base = os.path.splitext(summary_path)[0]
+
+        # 1) Regenerated accuracy matrix heatmap from JSON
+        try:
+            plt.figure(figsize=(6, 5))
+            vis = np.where(np.isnan(acc_mat), 0.0, acc_mat)
+            im = plt.imshow(vis, cmap='viridis', vmin=0.0, vmax=1.0)
+            for i in range(vis.shape[0]):
+                for j in range(vis.shape[1]):
+                    txt = '-' if np.isnan(acc_mat[i, j]) else f"{acc_mat[i, j]:.3f}"
+                    plt.text(j, i, txt, ha='center', va='center', color='white', fontsize=9)
+            plt.colorbar(im, fraction=0.046, pad=0.04)
+            ticks = np.arange(num_tasks)
+            labels = [f'T{i+1}' for i in ticks]
+            plt.xticks(ticks, labels)
+            plt.yticks(ticks, labels)
+            plt.xlabel('Evaluated Task')
+            plt.ylabel('After Training Task')
+            plt.title('CL Seen-Task Accuracy Matrix (from summary JSON)')
+            plt.tight_layout()
+            acc_png = base + '_regen_acc_matrix.png'
+            plt.savefig(acc_png, dpi=220)
+            plt.close()
+            print(f'>>> Saved regenerated accuracy matrix to {acc_png}')
+        except Exception as e:
+            print(f'Warning: failed to regenerate acc heatmap: {e}')
+
+        # 2) Combined matrix: [accuracy matrix; forgetting row]
+        forgetting_dict = summary.get('forgetting', {})
+        forgetting_row = np.full((1, num_tasks), np.nan, dtype=np.float64)
+        for j in range(num_tasks):
+            v = forgetting_dict.get(f'task_{j + 1}', None)
+            if v is None:
+                continue
+            try:
+                forgetting_row[0, j] = float(v)
+            except Exception:
+                pass
+
+        combined = np.vstack([acc_mat, forgetting_row])
+
+        # Save combined numeric matrix for downstream processing
+        npy_path = base + '_acc_forgetting_matrix.npy'
+        np.save(npy_path, combined)
+
+        csv_path = base + '_acc_forgetting_matrix.csv'
+        with open(csv_path, 'w') as cf:
+            header = ['stage/eval'] + [f'T{j+1}' for j in range(num_tasks)]
+            cf.write(','.join(header) + '\n')
+            for i in range(num_tasks):
+                vals = ['nan' if np.isnan(x) else f'{x:.6f}' for x in combined[i]]
+                cf.write(','.join([f'after_T{i+1}'] + vals) + '\n')
+            vals = ['nan' if np.isnan(x) else f'{x:.6f}' for x in combined[-1]]
+            cf.write(','.join(['forgetting'] + vals) + '\n')
+
+        # Visualization for combined matrix
+        try:
+            plt.figure(figsize=(6.5, 5.5))
+            # Forgetting can be >1? normally in [0,1], use dynamic vmax for safe display
+            vis2 = np.where(np.isnan(combined), 0.0, combined)
+            vmax = max(1.0, float(np.nanmax(vis2)) if vis2.size > 0 else 1.0)
+            im = plt.imshow(vis2, cmap='magma', vmin=0.0, vmax=vmax)
+            for i in range(vis2.shape[0]):
+                for j in range(vis2.shape[1]):
+                    txt = '-' if np.isnan(combined[i, j]) else f"{combined[i, j]:.3f}"
+                    plt.text(j, i, txt, ha='center', va='center', color='white', fontsize=9)
+            plt.colorbar(im, fraction=0.046, pad=0.04)
+            xticks = np.arange(num_tasks)
+            yticks = np.arange(num_tasks + 1)
+            xlabels = [f'T{i+1}' for i in xticks]
+            ylabels = [f'after_T{i+1}' for i in range(num_tasks)] + ['forgetting']
+            plt.xticks(xticks, xlabels)
+            plt.yticks(yticks, ylabels)
+            plt.xlabel('Evaluated Task')
+            plt.ylabel('Training Stage')
+            plt.title('CL Accuracy + Forgetting Matrix (from summary JSON)')
+            plt.tight_layout()
+            combo_png = base + '_regen_acc_forgetting_matrix.png'
+            plt.savefig(combo_png, dpi=220)
+            plt.close()
+            print(f'>>> Saved regenerated acc+forgetting matrix to {combo_png}')
+            print(f'>>> Saved numeric matrices: {npy_path}, {csv_path}')
+        except Exception as e:
+            print(f'Warning: failed to regenerate combined matrix heatmap: {e}')
+    except Exception as e:
+        print(f'Warning: failed to parse summary JSON for matrix regeneration: {e}')
+
+
 def _run_sequential_tasks(options, trainer_class, all_data_info):
     """Run sequential CL training across tasks, carrying global model forward."""
     num_tasks = max(1, int(options.get('num_tasks', 3)))
@@ -457,8 +567,16 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
         }
         task_options['num_active_classes'] = len(task_label_lists[task_idx - 1])
 
+        # Task-1 has no previous-task anchor; Task-2/3/... use previous global model snapshot
+        if prev_global_model is not None:
+            task_options['prev_model'] = prev_global_model.detach().clone()
+        else:
+            task_options['prev_model'] = None
+
         print('\n' + '=' * 90)
         print(f'>>> Start sequential Task-{task_idx}/{len(task_datasets)}')
+        print(f">>> Using previous-task regularization: lambda_old={task_options.get('lambda_old', 0.0)}")
+        print(f">>> Prev model loaded: {task_options.get('prev_model', None) is not None}")
         print('=' * 90)
 
         trainer = trainer_class(task_options, task_dataset)
@@ -538,6 +656,9 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
                    'forgetting': forgetting,
                    'mean_forgetting': mean_forgetting}, sf, indent=2)
     print(f'>>> Saved sequential CL summary to {summary_path}')
+
+    # Regenerate matrices from the saved summary JSON for easier inspection
+    _regenerate_cl_matrices_from_summary_json(summary_path)
 
     # Save matrix as npy for easier downstream analysis
     np.save(os.path.join('result', f"{options['dataset']}_cl_acc_matrix_{time.strftime('%Y-%m-%dT%H-%M-%S')}.npy"),

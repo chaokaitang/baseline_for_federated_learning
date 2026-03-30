@@ -176,6 +176,11 @@ class Worker(object):
                         # If shapes mismatch, skip proximal term (user should ensure correct shapes)
                         pass
 
+                # Generic algorithm hook: trainer can inject extra regularization terms here
+                loss_hook = kwargs.get('loss_hook', None)
+                if callable(loss_hook):
+                    loss = loss_hook(self, loss)
+
                 loss.backward()
                 torch.nn.utils.clip_grad_norm(self.model.parameters(), 60)
                 self.optimizer.step()

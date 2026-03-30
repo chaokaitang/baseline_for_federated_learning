@@ -48,7 +48,7 @@ def read_options():
     parser.add_argument('--num_round',
                         help='number of rounds to simulate;',
                         type=int,
-                        default=200)
+                        default=20)
     parser.add_argument('--eval_every',
                         help='evaluate every ____ rounds;',
                         type=int,
@@ -60,7 +60,7 @@ def read_options():
     parser.add_argument('--batch_size',
                         help='batch size when clients train on data;',
                         type=int,
-                        default=64)
+                        default=32)
     parser.add_argument('--num_epoch',
                         help='number of epochs when clients train on data;',
                         type=int,
@@ -105,6 +105,18 @@ def read_options():
                         help='L2 regularization coefficient to previous task global model',
                         type=float,
                         default=0.0)
+    parser.add_argument('--lambda_s',
+                        help='short-term anchor regularization coefficient (to client prev model)',
+                        type=float,
+                        default=0.0)
+    parser.add_argument('--lambda_l',
+                        help='long-term anchor regularization coefficient (to client EMA model)',
+                        type=float,
+                        default=0.0)
+    parser.add_argument('--alpha',
+                        help='EMA momentum for client long-term memory',
+                        type=float,
+                        default=0.9)
     parsed = parser.parse_args()
     options = parsed.__dict__
     options['gpu'] = options['gpu'] and torch.cuda.is_available()
@@ -342,7 +354,12 @@ def _split_dataset_into_tasks(all_data_info, num_tasks=3):
         if labels.size > 0:
             all_labels.append(labels)
     if len(all_labels) == 0:
-        raise ValueError('Cannot build CL tasks: no training labels found.')
+        raise ValueError(
+            'Cannot build CL tasks: no training labels found. '
+            'Likely causes: (1) dataset key filter matched no .pkl files, '
+            '(2) selected dataset has empty train labels. '
+            'Please verify --dataset and files under data/<dataset>/data/train.'
+        )
 
     unique_labels = np.unique(np.concatenate(all_labels))
     split_labels = [np.array(x, dtype=np.int64) for x in np.array_split(unique_labels, num_tasks)]
@@ -700,6 +717,18 @@ def main():
 
     # `dataset` is a tuple like (cids, groups, train_data, test_data)
     all_data_info = read_data(train_path, test_path, sub_data)
+
+    # Robust fallback: if key-based loading returns empty clients, retry without key filter.
+    if len(all_data_info[0]) == 0 and sub_data is not None:
+        print(f'Warning: no client data matched key "{sub_data}" under {train_path}.')
+        print('>>> Retry loading all .pkl files without key filter...')
+        all_data_info = read_data(train_path, test_path, key=None)
+
+    if len(all_data_info[0]) == 0:
+        raise ValueError(
+            f'No client data loaded from train_path={train_path}. '
+            f'Please check --dataset="{options["dataset"]}" and data files.'
+        )
 
     # Call appropriate trainer
     if options.get('sequential_cl', False):

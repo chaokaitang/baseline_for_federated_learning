@@ -59,8 +59,9 @@ class PFedMeTrainer(BaseTrainer):
                 v_k = self.personal_models.get(c.cid, self.latest_model)
                 try:
                     soln, stat = c.local_train(prox_mu=self.lambda_p, global_params=v_k)
-                except TypeError:
+                except TypeError as e:
                     # older Client interface may expect different signature; try worker call
+                    print(f"Warning[PFedMeTrainer.train]: round={round_i}, cid={c.cid}, fallback to worker.local_train due to {type(e).__name__}: {e}")
                     soln, stat = self.worker.local_train(c.train_dataloader, prox_mu=self.lambda_p, global_params=v_k)
 
                 if self.print_result:
@@ -79,7 +80,8 @@ class PFedMeTrainer(BaseTrainer):
                 # here `self.eta` is the inner-loop step size and `self.lambda_p` is lambda
                 try:
                     updated_vk = v_k - (self.eta * self.lambda_p) * (v_k - local_solution.detach())
-                except Exception:
+                except Exception as e:
+                    print(f"Warning[PFedMeTrainer.train]: round={round_i}, cid={c.cid}, personal model update fallback due to {type(e).__name__}: {e}")
                     updated_vk = local_solution.detach()
                 self.personal_models[c.cid] = updated_vk
 
@@ -103,7 +105,8 @@ class PFedMeTrainer(BaseTrainer):
                     personal_accs.append(float(acc))
                     self.metrics.update_personalized_eval_stats(round_i, c_all.cid, float(loss), float(acc))
                     c_all.set_flat_model_params(self.latest_model)
-                except Exception:
+                except Exception as e:
+                    print(f"Warning[PFedMeTrainer.train]: round={round_i}, cid={c_all.cid}, personalized eval skipped due to {type(e).__name__}: {e}")
                     continue
 
             self.metrics.update_personalized_aggregate(round_i, personal_losses, personal_accs)
@@ -111,8 +114,8 @@ class PFedMeTrainer(BaseTrainer):
             # Learning rate schedule step if any
             try:
                 self.optimizer.inverse_prop_decay_learning_rate(round_i)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Warning[PFedMeTrainer.train]: round={round_i}, lr decay failed due to {type(e).__name__}: {e}")
 
         # Final evaluation
         self.test_latest_model_on_traindata(self.num_round)
@@ -161,13 +164,14 @@ class PFedMeTrainer(BaseTrainer):
         # Ensure agg is on same device as latest_model
         try:
             agg = agg.to(self.latest_model.device)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning[PFedMeTrainer.aggregate]: failed to align device due to {type(e).__name__}: {e}")
 
         # Mix previous global model and aggregated client solution
         try:
             new_global = (1.0 - self.server_beta) * self.latest_model + self.server_beta * agg
-        except Exception:
+        except Exception as e:
+            print(f"Warning[PFedMeTrainer.aggregate]: global mixing fallback due to {type(e).__name__}: {e}")
             new_global = agg.detach()
 
         return new_global.detach()

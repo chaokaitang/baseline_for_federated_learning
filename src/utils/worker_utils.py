@@ -330,4 +330,4 @@ class Metrics(object):
         metrics_dir = os.path.join(self.result_path, self.exp_name, 'metrics.json')
 
         with open(metrics_dir, 'w') as ouf:
-            json.dump(str(metrics), ouf)
+            json.dump(metrics, ouf, indent=2)

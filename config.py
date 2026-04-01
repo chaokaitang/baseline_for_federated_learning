@@ -5,7 +5,8 @@ TRAINERS = {
     'fedprox': 'FedProxTrainer',
     'ditto': 'DittoTrainer',
     'pfedme': 'PFedMeTrainer',
-    'da_fedcl': 'DAFedCLTrainer'
+    'da_fedcl': 'DAFedCLTrainer',
+    'stp_fedcl': 'STPFedCLTrainer'
 }
 OPTIMIZERS = TRAINERS.keys()
 

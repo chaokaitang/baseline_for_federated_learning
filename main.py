@@ -117,9 +117,35 @@ def read_options():
                         help='EMA momentum for client long-term memory',
                         type=float,
                         default=0.9)
+    parser.add_argument('--beta_mode',
+                        help='collaboration beta mode: adaptive_search or fixed',
+                        type=str,
+                        default='adaptive_search')
+    parser.add_argument('--beta_fixed',
+                        help='fixed collaboration beta when beta_mode=fixed',
+                        type=float,
+                        default=0.5)
+    parser.add_argument('--beta_candidates',
+                        help='comma-separated beta candidates for adaptive search',
+                        type=str,
+                        default='0,0.25,0.5,0.75,1')
+    parser.add_argument('--beta_val_ratio',
+                        help='validation split ratio on each client for beta search',
+                        type=float,
+                        default=0.1)
     parsed = parser.parse_args()
     options = parsed.__dict__
     options['gpu'] = options['gpu'] and torch.cuda.is_available()
+    options['beta_mode'] = str(options.get('beta_mode', 'adaptive_search')).lower()
+    raw_candidates = str(options.get('beta_candidates', '0,0.25,0.5,0.75,1'))
+    try:
+        beta_candidates = [float(x.strip()) for x in raw_candidates.split(',') if x.strip() != '']
+    except Exception:
+        beta_candidates = [0.0, 0.25, 0.5, 0.75, 1.0]
+    beta_candidates = [float(max(0.0, min(1.0, b))) for b in beta_candidates]
+    if len(beta_candidates) == 0:
+        beta_candidates = [0.0, 0.25, 0.5, 0.75, 1.0]
+    options['beta_candidates'] = beta_candidates
 
     # Set seeds
     np.random.seed(1 + options['seed'])
@@ -151,6 +177,47 @@ def read_options():
         print(fmt_string % keyPair)
 
     return options, trainer_class, dataset_name, sub_data
+
+
+def _evaluate_collaboration_on_client(trainer, client, global_flat, personal_flat, beta):
+    """Evaluate mixed logits on one client's eval dataset."""
+    from torch.utils.data import DataLoader
+    import torch.nn as nn
+
+    dl = DataLoader(client.test_data, batch_size=trainer.batch_size, shuffle=False)
+    criterion = nn.CrossEntropyLoss()
+    total = 0
+    total_correct = 0
+    total_loss = 0.0
+
+    with torch.no_grad():
+        for x, y in dl:
+            x = trainer.worker.flatten_data(x)
+            if trainer.gpu:
+                x, y = x.cuda(), y.cuda()
+
+            trainer.worker.set_flat_model_params(global_flat)
+            pred_g = trainer.worker.model(x)
+            trainer.worker.set_flat_model_params(personal_flat)
+            pred_p = trainer.worker.model(x)
+
+            pred_mix = (1.0 - float(beta)) * pred_g + float(beta) * pred_p
+            pred_mix, y_local = trainer.worker._apply_task_aware_logits_labels(pred_mix, y)
+
+            loss = criterion(pred_mix, y_local)
+            _, pred_label = torch.max(pred_mix, 1)
+            correct = pred_label.eq(y_local).sum().item()
+
+            bs = y_local.size(0)
+            total += bs
+            total_correct += correct
+            total_loss += float(loss.item()) * bs
+
+    trainer.worker.set_flat_model_params(global_flat)
+
+    if total == 0:
+        return 0.0, 0.0
+    return float(total_correct) / float(total), float(total_loss) / float(total)
 
 
 def _post_train_eval_and_save(trainer):
@@ -258,6 +325,7 @@ def _post_train_eval_and_save(trainer):
             if hasattr(trainer, 'personal_models') and isinstance(trainer.personal_models, dict):
                 print('>>> Evaluating personalized models on each client test set...')
                 personal_acc = {}
+                personal_loss = {}
                 for c in trainer.clients:
                     p = trainer.personal_models.get(c.cid, trainer.latest_model)
                     try:
@@ -265,8 +333,10 @@ def _post_train_eval_and_save(trainer):
                         tot_correct, num_sample, loss = c.local_test(use_eval_data=True)
                         acc = float(tot_correct) / float(num_sample) if num_sample > 0 else 0.0
                         personal_acc[int(c.cid)] = acc
+                        personal_loss[int(c.cid)] = float(loss) / float(num_sample) if num_sample > 0 else 0.0
                     except Exception:
                         personal_acc[int(c.cid)] = 0.0
+                        personal_loss[int(c.cid)] = 0.0
 
                 personal_json_path = os.path.join(result_dir, 'client_acc_personal.json')
                 with open(personal_json_path, 'w') as outf:
@@ -327,6 +397,70 @@ def _post_train_eval_and_save(trainer):
                 except Exception:
                     bund = {'client_ids': ids_sorted, 'client_acc': accs.tolist(), 'stats': stats}
                 bund.update({'client_acc_personal': accs_p.tolist(), 'personal_stats': pstats})
+
+                # Collaboration evaluation (global + personal with client-specific beta)
+                if hasattr(trainer, 'client_betas') and isinstance(trainer.client_betas, dict):
+                    print('>>> Evaluating collaborative outputs on each client test set...')
+                    collab_acc = {}
+                    collab_loss = {}
+                    client_beta = {}
+                    global_flat = trainer.latest_model.detach().clone()
+
+                    for c in trainer.clients:
+                        cid = int(c.cid)
+                        beta = float(trainer.client_betas.get(c.cid, 0.5))
+                        p = trainer.personal_models.get(c.cid, trainer.latest_model).detach().clone()
+                        try:
+                            acc_c, loss_c = _evaluate_collaboration_on_client(
+                                trainer, c, global_flat, p, beta
+                            )
+                            collab_acc[cid] = float(acc_c)
+                            collab_loss[cid] = float(loss_c)
+                            client_beta[cid] = beta
+                        except Exception:
+                            collab_acc[cid] = 0.0
+                            collab_loss[cid] = 0.0
+                            client_beta[cid] = beta
+
+                    collab_json_path = os.path.join(result_dir, 'client_acc_collab.json')
+                    with open(collab_json_path, 'w') as outf:
+                        json.dump({'client_acc_collab': collab_acc, 'client_loss_collab': collab_loss}, outf)
+                    np.save(os.path.join(result_dir, 'client_acc_collab.npy'),
+                            np.array([collab_acc[i] for i in sorted(collab_acc.keys())]))
+
+                    beta_json_path = os.path.join(result_dir, 'client_beta.json')
+                    with open(beta_json_path, 'w') as outf:
+                        json.dump({'client_beta': client_beta}, outf)
+
+                    collab_arr = np.array(list(collab_acc.values()), dtype=np.float64)
+                    collab_stats = {
+                        'mean': float(np.mean(collab_arr)) if collab_arr.size > 0 else 0.0,
+                        'std': float(np.std(collab_arr)) if collab_arr.size > 0 else 0.0,
+                        'min': float(np.min(collab_arr)) if collab_arr.size > 0 else 0.0,
+                        'max': float(np.max(collab_arr)) if collab_arr.size > 0 else 0.0
+                    }
+
+                    try:
+                        final_round = int(trainer.num_round)
+                        for c in trainer.clients:
+                            cid = int(c.cid)
+                            trainer.metrics.update_collab_eval_stats(
+                                final_round, cid, float(collab_loss.get(cid, 0.0)), float(collab_acc.get(cid, 0.0))
+                            )
+                        trainer.metrics.update_collab_aggregate(
+                            final_round,
+                            [float(v) for v in collab_loss.values()],
+                            [float(v) for v in collab_acc.values()]
+                        )
+                    except Exception:
+                        pass
+
+                    bund.update({
+                        'client_acc_collab': [collab_acc[i] for i in sorted(collab_acc.keys())],
+                        'client_beta': [client_beta[i] for i in sorted(client_beta.keys())],
+                        'collab_stats': collab_stats
+                    })
+
                 try:
                     with open(bundle_path, 'w') as bf:
                         json.dump(bund, bf)
@@ -334,6 +468,11 @@ def _post_train_eval_and_save(trainer):
                     pass
         except Exception as e:
             print('Error during personalized model evaluation:', e)
+
+        try:
+            trainer.metrics.write()
+        except Exception:
+            pass
 
     except Exception as e:
         print(f'Error during post-train per-client evaluation: {e}')
@@ -465,6 +604,7 @@ def _regenerate_cl_matrices_from_summary_json(summary_path):
 
         with open(summary_path, 'r') as f:
             summary = json.load(f)
+        algo_name = summary.get('options', {}).get('algo', 'unknown')
 
         acc_mat = np.array(summary.get('eval_acc_matrix', []), dtype=np.float64)
         if acc_mat.size == 0:
@@ -490,7 +630,7 @@ def _regenerate_cl_matrices_from_summary_json(summary_path):
             plt.yticks(ticks, labels)
             plt.xlabel('Evaluated Task')
             plt.ylabel('After Training Task')
-            plt.title('CL Seen-Task Accuracy Matrix (from summary JSON)')
+            plt.title(f'[{algo_name}] CL Seen-Task Accuracy Matrix (from summary JSON)')
             plt.tight_layout()
             acc_png = base + '_regen_acc_matrix.png'
             plt.savefig(acc_png, dpi=220)
@@ -694,7 +834,7 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
         plt.colorbar(im, fraction=0.046, pad=0.04)
         plt.xlabel('Evaluated Task')
         plt.ylabel('After Training Task')
-        plt.title('Sequential CL Seen-Task Accuracy Matrix')
+        plt.title(f'[{options.get("algo", "unknown")}] Sequential CL Seen-Task Accuracy Matrix')
         ticks = np.arange(len(task_datasets))
         labels = [f'T{i+1}' for i in ticks]
         plt.xticks(ticks, labels)
@@ -717,12 +857,6 @@ def main():
 
     # `dataset` is a tuple like (cids, groups, train_data, test_data)
     all_data_info = read_data(train_path, test_path, sub_data)
-
-    # Robust fallback: if key-based loading returns empty clients, retry without key filter.
-    if len(all_data_info[0]) == 0 and sub_data is not None:
-        print(f'Warning: no client data matched key "{sub_data}" under {train_path}.')
-        print('>>> Retry loading all .pkl files without key filter...')
-        all_data_info = read_data(train_path, test_path, key=None)
 
     if len(all_data_info[0]) == 0:
         raise ValueError(

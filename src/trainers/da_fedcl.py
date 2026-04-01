@@ -54,19 +54,19 @@ class DAFedCLTrainer(BaseTrainer):
                 g = global_model
                 if g.device != current.device:
                     g = g.to(current.device)
-                reg = reg + self.mu * torch.sum((current - g) ** 2)
+                reg = reg + 0.5 * self.mu * torch.sum((current - g) ** 2)
 
             if self.lambda_s > 0.0:
                 p = prev_anchor
                 if p.device != current.device:
                     p = p.to(current.device)
-                reg = reg + self.lambda_s * torch.sum((current - p) ** 2)
+                reg = reg + 0.5 * self.lambda_s * torch.sum((current - p) ** 2)
 
             if self.lambda_l > 0.0:
                 e = ema_anchor
                 if e.device != current.device:
                     e = e.to(current.device)
-                reg = reg + self.lambda_l * torch.sum((current - e) ** 2)
+                reg = reg + 0.5 * self.lambda_l * torch.sum((current - e) ** 2)
 
             if self.print_result and (not printed_once['flag']):
                 try:

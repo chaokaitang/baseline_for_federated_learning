@@ -170,7 +170,7 @@ class Worker(object):
                         current_flat = current_flat.cuda()
                     # make sure tensors align
                     try:
-                        prox = (prox_mu / 2.0) * torch.sum((current_flat - global_params) ** 2)
+                        prox = 0.5 * prox_mu * torch.sum((current_flat - global_params) ** 2)
                         loss = loss + prox
                     except Exception:
                         # If shapes mismatch, skip proximal term (user should ensure correct shapes)

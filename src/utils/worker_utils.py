@@ -149,6 +149,12 @@ class Metrics(object):
         self.personalized_mean_loss = [0] * num_rounds
         self.personalized_mean_acc = [0] * num_rounds
         self.personalized_std_acc = [0] * num_rounds
+        # Collaborative (global-personal mixed) stats
+        self.collab_loss_on_eval = {c.cid: [0] * num_rounds for c in clients}
+        self.collab_acc_on_eval = {c.cid: [0] * num_rounds for c in clients}
+        self.collab_mean_loss = [0] * num_rounds
+        self.collab_mean_acc = [0] * num_rounds
+        self.collab_std_acc = [0] * num_rounds
 
         self.result_path = mkdir(os.path.join('./result', self.options['dataset']))
         suffix = '{}_sd{}_lr{}_ep{}_bs{}_{}'.format(name,
@@ -254,6 +260,38 @@ class Metrics(object):
             # if add_scalars not supported by writer implementation, ignore
             pass
 
+    def update_collab_eval_stats(self, round_i, cid, loss, acc):
+        if cid not in self.collab_loss_on_eval:
+            num_rounds = self.options['num_round'] + 1
+            self.collab_loss_on_eval[cid] = [0] * num_rounds
+            self.collab_acc_on_eval[cid] = [0] * num_rounds
+
+        self.collab_loss_on_eval[cid][round_i] = loss
+        self.collab_acc_on_eval[cid][round_i] = acc
+
+        self.eval_writer.add_scalar(f'collab/test_loss/client_{cid}', loss, round_i)
+        self.eval_writer.add_scalar(f'collab/test_acc/client_{cid}', acc, round_i)
+
+    def update_collab_aggregate(self, round_i, losses_list, accs_list):
+        if len(losses_list) == 0:
+            mean_loss = 0.0
+        else:
+            mean_loss = float(np.mean(losses_list))
+        if len(accs_list) == 0:
+            mean_acc = 0.0
+            std_acc = 0.0
+        else:
+            mean_acc = float(np.mean(accs_list))
+            std_acc = float(np.std(accs_list))
+
+        self.collab_mean_loss[round_i] = mean_loss
+        self.collab_mean_acc[round_i] = mean_acc
+        self.collab_std_acc[round_i] = std_acc
+
+        self.eval_writer.add_scalar('collab/mean_test_loss', mean_loss, round_i)
+        self.eval_writer.add_scalar('collab/mean_test_acc', mean_acc, round_i)
+        self.eval_writer.add_scalar('collab/std_test_acc', std_acc, round_i)
+
     def write(self):
         metrics = dict()
 
@@ -275,9 +313,14 @@ class Metrics(object):
         metrics['personalized_mean_loss'] = self.personalized_mean_loss
         metrics['personalized_mean_acc'] = self.personalized_mean_acc
         metrics['personalized_std_acc'] = self.personalized_std_acc
+        metrics['collab_mean_loss'] = self.collab_mean_loss
+        metrics['collab_mean_acc'] = self.collab_mean_acc
+        metrics['collab_std_acc'] = self.collab_std_acc
 
         metrics['personalized_loss_on_eval'] = self.personalized_loss_on_eval
         metrics['personalized_acc_on_eval'] = self.personalized_acc_on_eval
+        metrics['collab_loss_on_eval'] = self.collab_loss_on_eval
+        metrics['collab_acc_on_eval'] = self.collab_acc_on_eval
 
         # Dict(key=cid, value=list(stats for each round))
         metrics['client_computations'] = self.client_computations

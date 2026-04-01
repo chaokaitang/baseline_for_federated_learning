@@ -60,9 +60,9 @@ class DittoTrainer(BaseTrainer):
 
                     # (defer evaluation of personalized models until after all personal updates)
                     pass
-                except Exception:
+                except Exception as e:
                     # If personalization fails for any client, skip and keep previous personal model
-                    pass
+                    print(f"Warning[DittoTrainer.train]: round={round_i}, cid={c.cid}, personalization failed due to {type(e).__name__}: {e}")
 
             # After personalization updates, evaluate personalized models for ALL clients
             personal_losses = []
@@ -80,8 +80,9 @@ class DittoTrainer(BaseTrainer):
                     self.metrics.update_personalized_eval_stats(round_i, c_all.cid, float(loss), float(acc))
                     # restore client's model to global for next operations
                     c_all.set_flat_model_params(self.latest_model)
-                except Exception:
+                except Exception as e:
                     # if evaluation fails for a client, skip it
+                    print(f"Warning[DittoTrainer.train]: round={round_i}, cid={c_all.cid}, personalized eval skipped due to {type(e).__name__}: {e}")
                     continue
 
             # record aggregated personalized statistics (mean and std)
@@ -90,8 +91,8 @@ class DittoTrainer(BaseTrainer):
             # Learning rate schedule step if any
             try:
                 self.optimizer.inverse_prop_decay_learning_rate(round_i)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Warning[DittoTrainer.train]: round={round_i}, lr decay failed due to {type(e).__name__}: {e}")
 
         # Final evaluation
         self.test_latest_model_on_traindata(self.num_round)

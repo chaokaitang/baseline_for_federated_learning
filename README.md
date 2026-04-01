@@ -31,6 +31,10 @@ This repository provides a minimal-yet-complete baseline framework for federated
 - **New models**: add architectures in `src/models/model.py` and update `choose_model`/`MODEL_PARAMS` for the dataset’s input shape and class count.
 - **New datasets**: ensure preprocessing outputs compatible `.pkl` shards and extend `MODEL_PARAMS` in `config.py` if input dimensions differ.
 
+## Notes on algorithm naming
+
+- The current `pfedme` trainer is implemented as an **approximate / pFedMe-like baseline** for quick comparison, not a strict line-by-line reimplementation of the original paper.
+
 ## Tips for experiments
 
 - Start with the provided MNIST setup to validate your environment and logging pipeline.

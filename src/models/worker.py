@@ -137,13 +137,15 @@ class Worker(object):
                 pred, y = self._apply_task_aware_logits_labels(pred, y)
 
                 if torch.isnan(pred_eval.max()):
-                    from IPython import embed
-                    embed()
+                    raise RuntimeError(
+                        "RuntimeError[Worker.local_train]: NaN detected in model output logits."
+                    )
 
                 loss = criterion(pred, y)
 
                 # Historical parameter regularization to previous-task global model
                 # Task-1 has no previous model; task2/task3 use previous task snapshot as anchor.
+                # Uses unnormalized squared L2 penalty: torch.sum((w - w_old)**2)
                 if prev_model is not None and lambda_old > 0.0:
                     try:
                         current_flat = torch.cat([p.view(-1) for p in self.model.parameters()])
@@ -155,11 +157,12 @@ class Worker(object):
                         if not printed_reg_once:
                             print(f'>>> old-model reg enabled: lambda_old={lambda_old}, reg_loss={reg_loss_old.item():.6f}')
                             printed_reg_once = True
-                    except Exception:
+                    except Exception as e:
                         # Keep baseline behavior if shape/device alignment fails
-                        pass
+                        print(f"Warning[Worker.local_train]: old-model regularization skipped due to {type(e).__name__}: {e}")
 
                 # FedProx proximal term: add (mu/2) * ||w - w_global||^2 to loss
+                # Uses unnormalized squared L2 penalty: torch.sum((w - w_global)**2)
                 prox_mu = kwargs.get('prox_mu', 0.0)
                 if prox_mu and prox_mu > 0.0 and 'global_params' in kwargs:
                     global_params = kwargs['global_params']
@@ -172,9 +175,9 @@ class Worker(object):
                     try:
                         prox = 0.5 * prox_mu * torch.sum((current_flat - global_params) ** 2)
                         loss = loss + prox
-                    except Exception:
+                    except Exception as e:
                         # If shapes mismatch, skip proximal term (user should ensure correct shapes)
-                        pass
+                        print(f"Warning[Worker.local_train]: FedProx proximal term skipped due to {type(e).__name__}: {e}")
 
                 # Generic algorithm hook: trainer can inject extra regularization terms here
                 loss_hook = kwargs.get('loss_hook', None)

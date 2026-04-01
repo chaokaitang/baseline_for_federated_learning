@@ -12,6 +12,8 @@ class DAFedCLTrainer(BaseTrainer):
           + mu * ||w - w_global||^2
           + lambda_s * ||w - w_prev||^2
           + lambda_l * ||w - w_ema||^2
+        NOTE: regularizers are unnormalized squared L2 penalties
+              implemented with torch.sum((...) ** 2).
 
     Notes:
     - Algorithm logic is kept in trainer layer.

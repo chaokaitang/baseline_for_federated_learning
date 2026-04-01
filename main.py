@@ -140,7 +140,8 @@ def read_options():
     raw_candidates = str(options.get('beta_candidates', '0,0.25,0.5,0.75,1'))
     try:
         beta_candidates = [float(x.strip()) for x in raw_candidates.split(',') if x.strip() != '']
-    except Exception:
+    except Exception as e:
+        print(f"Warning[read_options]: failed to parse --beta_candidates `{raw_candidates}`, fallback to default due to {type(e).__name__}: {e}")
         beta_candidates = [0.0, 0.25, 0.5, 0.75, 1.0]
     beta_candidates = [float(max(0.0, min(1.0, b))) for b in beta_candidates]
     if len(beta_candidates) == 0:
@@ -243,7 +244,8 @@ def _post_train_eval_and_save(trainer):
 
             try:
                 labels = c.train_data.labels
-            except Exception:
+            except Exception as e:
+                print(f"Warning[_post_train_eval_and_save]: failed to read train labels for cid={c.cid} due to {type(e).__name__}: {e}")
                 labels = None
 
             if labels is not None and len(labels) > 0:
@@ -318,8 +320,8 @@ def _post_train_eval_and_save(trainer):
             with open(bundle_path, 'w') as bf:
                 json.dump({'client_ids': ids_sorted, 'client_acc': accs.tolist(), 'stats': stats}, bf)
             print(f'>>> Saved client_acc bundle to {bundle_path}')
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning[_post_train_eval_and_save]: failed to write bundle file `{bundle_path}` due to {type(e).__name__}: {e}")
 
         try:
             if hasattr(trainer, 'personal_models') and isinstance(trainer.personal_models, dict):
@@ -334,7 +336,8 @@ def _post_train_eval_and_save(trainer):
                         acc = float(tot_correct) / float(num_sample) if num_sample > 0 else 0.0
                         personal_acc[int(c.cid)] = acc
                         personal_loss[int(c.cid)] = float(loss) / float(num_sample) if num_sample > 0 else 0.0
-                    except Exception:
+                    except Exception as e:
+                        print(f"Warning[_post_train_eval_and_save]: personalized eval fallback cid={c.cid} due to {type(e).__name__}: {e}")
                         personal_acc[int(c.cid)] = 0.0
                         personal_loss[int(c.cid)] = 0.0
 
@@ -374,8 +377,8 @@ def _post_train_eval_and_save(trainer):
                     barpath_p = os.path.join(result_dir, 'client_acc_personal_bar.png')
                     plt.savefig(barpath_p, dpi=200)
                     plt.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Warning[_post_train_eval_and_save]: failed to save personalized bar plot due to {type(e).__name__}: {e}")
 
                 try:
                     plt.figure(figsize=(8, 4))
@@ -388,13 +391,14 @@ def _post_train_eval_and_save(trainer):
                     sortpath_p = os.path.join(result_dir, 'client_acc_personal_sorted.png')
                     plt.savefig(sortpath_p, dpi=200)
                     plt.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Warning[_post_train_eval_and_save]: failed to save personalized sorted plot due to {type(e).__name__}: {e}")
 
                 try:
                     with open(bundle_path, 'r') as bf:
                         bund = json.load(bf)
-                except Exception:
+                except Exception as e:
+                    print(f"Warning[_post_train_eval_and_save]: failed to read bundle file `{bundle_path}`, rebuilding due to {type(e).__name__}: {e}")
                     bund = {'client_ids': ids_sorted, 'client_acc': accs.tolist(), 'stats': stats}
                 bund.update({'client_acc_personal': accs_p.tolist(), 'personal_stats': pstats})
 
@@ -417,7 +421,8 @@ def _post_train_eval_and_save(trainer):
                             collab_acc[cid] = float(acc_c)
                             collab_loss[cid] = float(loss_c)
                             client_beta[cid] = beta
-                        except Exception:
+                        except Exception as e:
+                            print(f"Warning[_post_train_eval_and_save]: collaborative eval fallback cid={cid} due to {type(e).__name__}: {e}")
                             collab_acc[cid] = 0.0
                             collab_loss[cid] = 0.0
                             client_beta[cid] = beta
@@ -452,8 +457,8 @@ def _post_train_eval_and_save(trainer):
                             [float(v) for v in collab_loss.values()],
                             [float(v) for v in collab_acc.values()]
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"Warning[_post_train_eval_and_save]: failed to update collab metrics at final_round={final_round} due to {type(e).__name__}: {e}")
 
                     bund.update({
                         'client_acc_collab': [collab_acc[i] for i in sorted(collab_acc.keys())],
@@ -464,15 +469,15 @@ def _post_train_eval_and_save(trainer):
                 try:
                     with open(bundle_path, 'w') as bf:
                         json.dump(bund, bf)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Warning[_post_train_eval_and_save]: failed to persist updated bundle `{bundle_path}` due to {type(e).__name__}: {e}")
         except Exception as e:
             print('Error during personalized model evaluation:', e)
 
         try:
             trainer.metrics.write()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning[_post_train_eval_and_save]: trainer.metrics.write failed due to {type(e).__name__}: {e}")
 
     except Exception as e:
         print(f'Error during post-train per-client evaluation: {e}')
@@ -648,8 +653,8 @@ def _regenerate_cl_matrices_from_summary_json(summary_path):
                 continue
             try:
                 forgetting_row[0, j] = float(v)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Warning[_regenerate_cl_matrices_from_summary_json]: failed to parse forgetting for task_{j + 1} due to {type(e).__name__}: {e}")
 
         combined = np.vstack([acc_mat, forgetting_row])
 
@@ -710,6 +715,7 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
         print(f'    Task-{i} labels: {ls}')
 
     prev_global_model = None
+    prev_client_state = None
     task_summaries = []
     eval_acc_matrix = np.full((len(task_datasets), len(task_datasets)), np.nan, dtype=np.float64)
     eval_loss_matrix = np.full((len(task_datasets), len(task_datasets)), np.nan, dtype=np.float64)
@@ -741,6 +747,12 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
         if prev_global_model is not None:
             trainer.worker.set_flat_model_params(prev_global_model)
             trainer.latest_model = prev_global_model.detach().clone()
+        if prev_client_state is not None and hasattr(trainer, 'import_client_state'):
+            try:
+                trainer.import_client_state(prev_client_state)
+                print(f'>>> Restored trainer client state for Task-{task_idx}')
+            except Exception as e:
+                print(f'Warning[_run_sequential_tasks]: failed to restore client state for task={task_idx} due to {type(e).__name__}: {e}')
 
         trainer.train()
         _post_train_eval_and_save(trainer)
@@ -774,6 +786,13 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
             print(f'Warning: failed to save stage seen-task eval for task{task_idx}: {e}')
 
         prev_global_model = trainer.latest_model.detach().clone()
+        if hasattr(trainer, 'export_client_state'):
+            try:
+                prev_client_state = trainer.export_client_state()
+                print(f'>>> Exported trainer client state after Task-{task_idx}')
+            except Exception as e:
+                prev_client_state = None
+                print(f'Warning[_run_sequential_tasks]: failed to export client state for task={task_idx} due to {type(e).__name__}: {e}')
 
         task_result_dir = os.path.join(trainer.metrics.result_path, trainer.metrics.exp_name)
         task_summaries.append({

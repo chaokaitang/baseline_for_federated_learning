@@ -16,6 +16,8 @@ class STPFedCLTrainer(BaseTrainer):
           + mu * ||p_k - w_g||^2
           + lambda_s * ||p_k - p_k_prev||^2
           + lambda_l * ||p_k - p_k_ema||^2
+        NOTE: all L2 penalties here are unnormalized squared L2 penalties,
+              implemented with torch.sum((...) ** 2).
 
     Beta selection (inference-only):
         y_hat = (1-beta_k) * f(x; w_g) + beta_k * f(x; p_k)
@@ -64,19 +66,19 @@ class STPFedCLTrainer(BaseTrainer):
                 g = global_model
                 if g.device != current.device:
                     g = g.to(current.device)
-                reg = reg + 0.5 * self.mu * torch.mean((current - g) ** 2)
+                reg = reg + 0.5 * self.mu * torch.sum((current - g) ** 2)
 
             if self.lambda_s > 0.0:
                 p = prev_anchor
                 if p.device != current.device:
                     p = p.to(current.device)
-                reg = reg + 0.5 * self.lambda_s * torch.mean((current - p) ** 2)
+                reg = reg + 0.5 * self.lambda_s * torch.sum((current - p) ** 2)
 
             if self.lambda_l > 0.0:
                 e = ema_anchor
                 if e.device != current.device:
                     e = e.to(current.device)
-                reg = reg + 0.5 * self.lambda_l * torch.mean((current - e) ** 2)
+                reg = reg + 0.5 * self.lambda_l * torch.sum((current - e) ** 2)
 
             return base_loss + reg
 
@@ -93,7 +95,9 @@ class STPFedCLTrainer(BaseTrainer):
         self.client_ema[cid] = new_ema.detach().clone()
 
     def _make_client_val_loader(self, client):
-        ds = client.test_data
+        # IMPORTANT: beta search must not use test data.
+        # Use a deterministic validation split from client TRAIN data.
+        ds = client.train_data
         n = len(ds)
         if n == 0:
             return None
@@ -110,6 +114,44 @@ class STPFedCLTrainer(BaseTrainer):
 
         val_ds = Subset(ds, val_idx)
         return DataLoader(val_ds, batch_size=self.batch_size, shuffle=False)
+
+    def export_client_state(self):
+        """Export minimal per-client state for sequential CL task transfer."""
+        return {
+            'personal_models': {cid: v.detach().clone() for cid, v in self.personal_models.items()},
+            'client_prev': {cid: v.detach().clone() for cid, v in self.client_prev.items()},
+            'client_ema': {cid: v.detach().clone() for cid, v in self.client_ema.items()},
+            'client_betas': {cid: float(v) for cid, v in self.client_betas.items()},
+        }
+
+    def import_client_state(self, state):
+        """Restore per-client state for sequential CL task transfer."""
+        if not isinstance(state, dict):
+            print("Warning[STPFedCLTrainer.import_client_state]: invalid state type, skip restore.")
+            return
+
+        def _restore_tensor_map(src_map, dst_map_name):
+            src = state.get(src_map, {})
+            if not isinstance(src, dict):
+                print(f"Warning[STPFedCLTrainer.import_client_state]: invalid `{src_map}`, skip.")
+                return {}
+            restored = {}
+            for c in self.clients:
+                if c.cid in src:
+                    restored[c.cid] = src[c.cid].detach().clone()
+                else:
+                    restored[c.cid] = self.latest_model.detach().clone()
+            setattr(self, dst_map_name, restored)
+
+        _restore_tensor_map('personal_models', 'personal_models')
+        _restore_tensor_map('client_prev', 'client_prev')
+        _restore_tensor_map('client_ema', 'client_ema')
+
+        betas = state.get('client_betas', {})
+        if not isinstance(betas, dict):
+            print("Warning[STPFedCLTrainer.import_client_state]: invalid `client_betas`, use default.")
+            betas = {}
+        self.client_betas = {c.cid: float(betas.get(c.cid, self.beta_fixed)) for c in self.clients}
 
     def _eval_mixed_logits(self, dataloader, global_flat, personal_flat, beta):
         if dataloader is None:
@@ -194,10 +236,31 @@ class STPFedCLTrainer(BaseTrainer):
         self.metrics.update_personalized_aggregate(round_i, losses, accs)
         self.worker.set_flat_model_params(self.latest_model)
 
+    def _evaluate_collab_all_clients(self, round_i):
+        losses = []
+        accs = []
+        global_flat = self.latest_model.detach().clone()
+        for c in self.clients:
+            beta = float(self.client_betas.get(c.cid, self.beta_fixed))
+            personal = self.personal_models.get(c.cid, self.latest_model).detach().clone()
+            eval_loader = DataLoader(c.test_data, batch_size=self.batch_size, shuffle=False)
+            try:
+                acc, loss, _ = self._eval_mixed_logits(eval_loader, global_flat, personal, beta)
+                self.metrics.update_collab_eval_stats(round_i, c.cid, float(loss), float(acc))
+                losses.append(float(loss))
+                accs.append(float(acc))
+            except Exception as e:
+                print(f"Warning[STPFedCLTrainer._evaluate_collab_all_clients]: round={round_i}, cid={c.cid}, error={type(e).__name__}: {e}")
+
+        self.metrics.update_collab_aggregate(round_i, losses, accs)
+        self.worker.set_flat_model_params(self.latest_model)
+
     def train(self):
         print('>>> Select {} clients per round \n'.format(self.clients_per_round))
 
         self.latest_model = self.worker.get_flat_model_params().detach()
+        # Conservative starting point under sum-scale L2 penalties:
+        # try mu/lambda_s/lambda_l in [1e-6, 1e-4] first.
 
         for round_i in range(self.num_round):
             self.test_latest_model_on_traindata(round_i)
@@ -226,6 +289,8 @@ class STPFedCLTrainer(BaseTrainer):
 
             # Track personalized metrics each round
             self._evaluate_personalized_all_clients(round_i)
+            self._update_all_client_betas()
+            self._evaluate_collab_all_clients(round_i)
 
             self.optimizer.inverse_prop_decay_learning_rate(round_i)
 

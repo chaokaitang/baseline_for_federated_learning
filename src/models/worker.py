@@ -157,9 +157,9 @@ class Worker(object):
                             prev_flat = prev_flat.to(current_flat.device)
                         reg_loss_old = torch.sum((current_flat - prev_flat) ** 2)
                         loss = loss + lambda_old * reg_loss_old
-                        if not printed_reg_once:
-                            print(f'>>> old-model reg enabled: lambda_old={lambda_old}, reg_loss={reg_loss_old.item():.6f}')
-                            printed_reg_once = True
+                        # if not printed_reg_once:
+                        #     print(f'>>> old-model reg enabled: lambda_old={lambda_old}, reg_loss={reg_loss_old.item():.6f}')
+                        #     printed_reg_once = True
                     except Exception as e:
                         # Keep baseline behavior if shape/device alignment fails
                         print(f"Warning[Worker.local_train]: old-model regularization skipped due to {type(e).__name__}: {e}")

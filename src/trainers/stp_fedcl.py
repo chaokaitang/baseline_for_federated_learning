@@ -45,6 +45,8 @@ class STPFedCLTrainer(BaseTrainer):
         if len(self.beta_candidates) == 0:
             self.beta_candidates = [0.0, 0.25, 0.5, 0.75, 1.0]
         self.beta_val_ratio = float(options.get('beta_val_ratio', 0.1))
+        self.log_reg_terms = bool(options.get('log_reg_terms', False))
+        self.reg_log_every = max(1, int(options.get('reg_log_every', 20)))
 
         # Client states
         init_flat = self.worker.get_flat_model_params().detach()
@@ -57,28 +59,52 @@ class STPFedCLTrainer(BaseTrainer):
     def _flat_params_with_grad(model):
         return torch.cat([p.view(-1) for p in model.parameters()])
 
-    def _build_personal_loss_hook(self, global_model, prev_anchor, ema_anchor):
+    def _build_personal_loss_hook(self, global_model, prev_anchor, ema_anchor, round_i=None, cid=None):
+        step_counter = {'n': 0}
+
         def _hook(worker, base_loss):
             current = self._flat_params_with_grad(worker.model)
-            reg = 0.0
+            reg = torch.tensor(0.0, device=current.device, dtype=current.dtype)
+
+            reg_mu = torch.tensor(0.0, device=current.device, dtype=current.dtype)
+            reg_s = torch.tensor(0.0, device=current.device, dtype=current.dtype)
+            reg_l = torch.tensor(0.0, device=current.device, dtype=current.dtype)
 
             if self.mu > 0.0:
                 g = global_model
                 if g.device != current.device:
                     g = g.to(current.device)
-                reg = reg + 0.5 * self.mu * torch.sum((current - g) ** 2)
+                reg_mu = 0.5 * self.mu * torch.sum((current - g) ** 2)
+                reg = reg + reg_mu
 
             if self.lambda_s > 0.0:
                 p = prev_anchor
                 if p.device != current.device:
                     p = p.to(current.device)
-                reg = reg + 0.5 * self.lambda_s * torch.sum((current - p) ** 2)
+                reg_s = 0.5 * self.lambda_s * torch.sum((current - p) ** 2)
+                reg = reg + reg_s
 
             if self.lambda_l > 0.0:
                 e = ema_anchor
                 if e.device != current.device:
                     e = e.to(current.device)
-                reg = reg + 0.5 * self.lambda_l * torch.sum((current - e) ** 2)
+                reg_l = 0.5 * self.lambda_l * torch.sum((current - e) ** 2)
+                reg = reg + reg_l
+
+            if self.log_reg_terms:
+                step_counter['n'] += 1
+                if step_counter['n'] % self.reg_log_every == 0:
+                    try:
+                        print(
+                            f"[RegTerms] round={round_i} cid={cid} step={step_counter['n']} "
+                            f"base={float(base_loss.item()):.6f} "
+                            f"mu={float(reg_mu.item()):.6f} "
+                            f"short={float(reg_s.item()):.6f} "
+                            f"long={float(reg_l.item()):.6f} "
+                            f"total_reg={float(reg.item()):.6f}"
+                        )
+                    except Exception:
+                        pass
 
             return base_loss + reg
 
@@ -282,7 +308,11 @@ class STPFedCLTrainer(BaseTrainer):
 
                 prev_anchor = self.client_prev.get(c.cid, personal).detach().clone()
                 ema_anchor = self.client_ema.get(c.cid, personal).detach().clone()
-                loss_hook = self._build_personal_loss_hook(global_anchor, prev_anchor, ema_anchor)
+                loss_hook = self._build_personal_loss_hook(global_anchor,
+                                                           prev_anchor,
+                                                           ema_anchor,
+                                                           round_i=round_i,
+                                                           cid=c.cid)
 
                 local_solution, _ = self.worker.local_train(c.train_dataloader, loss_hook=loss_hook)
                 self.personal_models[c.cid] = local_solution.detach().clone()

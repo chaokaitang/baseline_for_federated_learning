@@ -133,9 +133,17 @@ def read_options():
                         help='validation split ratio on each client for beta search',
                         type=float,
                         default=0.1)
-    parser.add_argument('--task_aware',
+    parser.add_argument('--log_reg_terms',
                         action='store_true',
                         default=False,
+                        help='print regularization term values during local personalized training')
+    parser.add_argument('--reg_log_every',
+                        help='print regularization terms every N local mini-batches (when --log_reg_terms is set)',
+                        type=int,
+                        default=20)
+    parser.add_argument('--task_aware',
+                        action='store_true',
+                        default=True,
                         help='enable task-aware logit slicing/remap (TIL setting); default False for class-incremental eval')
     parsed = parser.parse_args()
     options = parsed.__dict__

@@ -101,9 +101,10 @@ class PFedMeTrainer(BaseTrainer):
                     c_all.set_flat_model_params(p)
                     tot_correct, num_sample, loss = c_all.local_test(use_eval_data=True)
                     acc = tot_correct / num_sample if num_sample > 0 else 0.0
-                    personal_losses.append(float(loss))
+                    avg_loss = float(loss) / float(num_sample) if num_sample > 0 else 0.0
+                    personal_losses.append(avg_loss)
                     personal_accs.append(float(acc))
-                    self.metrics.update_personalized_eval_stats(round_i, c_all.cid, float(loss), float(acc))
+                    self.metrics.update_personalized_eval_stats(round_i, c_all.cid, avg_loss, float(acc))
                     c_all.set_flat_model_params(self.latest_model)
                 except Exception as e:
                     print(f"Warning[PFedMeTrainer.train]: round={round_i}, cid={c_all.cid}, personalized eval skipped due to {type(e).__name__}: {e}")

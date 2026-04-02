@@ -133,6 +133,10 @@ def read_options():
                         help='validation split ratio on each client for beta search',
                         type=float,
                         default=0.1)
+    parser.add_argument('--task_aware',
+                        action='store_true',
+                        default=False,
+                        help='enable task-aware logit slicing/remap (TIL setting); default False for class-incremental eval')
     parsed = parser.parse_args()
     options = parsed.__dict__
     options['gpu'] = options['gpu'] and torch.cuda.is_available()
@@ -562,7 +566,7 @@ def _evaluate_global_on_dataset(trainer, dataset_tuple, model_flat, active_label
     # Temporarily switch worker to the evaluated task label space
     old_active_labels = trainer.worker.options.get('active_labels', None)
     old_label_map = trainer.worker.options.get('label_map', None)
-    if active_labels is not None:
+    if bool(trainer.worker.options.get('task_aware', False)) and active_labels is not None:
         trainer.worker.options['active_labels'] = [int(v) for v in active_labels]
         trainer.worker.options['label_map'] = {
             int(g): int(i) for i, g in enumerate(active_labels)

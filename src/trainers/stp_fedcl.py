@@ -229,9 +229,10 @@ class STPFedCLTrainer(BaseTrainer):
             c.set_flat_model_params(p)
             tot_correct, num_sample, loss = c.local_test(use_eval_data=True)
             acc = float(tot_correct) / float(num_sample) if num_sample > 0 else 0.0
-            losses.append(float(loss))
+            avg_loss = float(loss) / float(num_sample) if num_sample > 0 else 0.0
+            losses.append(avg_loss)
             accs.append(float(acc))
-            self.metrics.update_personalized_eval_stats(round_i, c.cid, float(loss), float(acc))
+            self.metrics.update_personalized_eval_stats(round_i, c.cid, avg_loss, float(acc))
 
         self.metrics.update_personalized_aggregate(round_i, losses, accs)
         self.worker.set_flat_model_params(self.latest_model)

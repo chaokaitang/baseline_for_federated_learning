@@ -70,6 +70,9 @@ class Worker(object):
             self.options['active_labels']: list of global labels for current task
             self.options['label_map']: dict global_label -> local_label
         """
+        if not bool(self.options.get('task_aware', False)):
+            return pred, y
+
         active_labels = self.options.get('active_labels', None)
         if active_labels is None or len(active_labels) == 0:
             return pred, y

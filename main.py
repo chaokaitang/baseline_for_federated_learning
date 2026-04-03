@@ -65,6 +65,11 @@ def read_options():
                         help='number of epochs when clients train on data;',
                         type=int,
                         default=5)
+    parser.add_argument('--personal_num_epoch',
+                        help='number of epochs for Ditto personalized proximal update; '
+                             'if <=0 or unset, fallback to --num_epoch',
+                        type=int,
+                        default=None)
     parser.add_argument('--lr',
                         help='learning rate for inner solver;',
                         type=float,
@@ -148,6 +153,13 @@ def read_options():
     parsed = parser.parse_args()
     options = parsed.__dict__
     options['gpu'] = options['gpu'] and torch.cuda.is_available()
+    if options.get('personal_num_epoch', None) is None:
+        options['personal_num_epoch'] = int(options['num_epoch'])
+    elif int(options['personal_num_epoch']) <= 0:
+        print(f"Warning[read_options]: invalid --personal_num_epoch={options['personal_num_epoch']}, fallback to --num_epoch={options['num_epoch']}")
+        options['personal_num_epoch'] = int(options['num_epoch'])
+    else:
+        options['personal_num_epoch'] = int(options['personal_num_epoch'])
     options['beta_mode'] = str(options.get('beta_mode', 'adaptive_search')).lower()
     raw_candidates = str(options.get('beta_candidates', '0,0.25,0.5,0.75,1'))
     try:
@@ -610,6 +622,91 @@ def _evaluate_global_on_dataset(trainer, dataset_tuple, model_flat, active_label
     }
 
 
+def _evaluate_personal_on_dataset(trainer, dataset_tuple, personal_models, active_labels=None, weighted=True):
+    """Evaluate personalized models on a task dataset tuple.
+
+    For each client, evaluate with its own personalized model, then aggregate across clients.
+    By default uses sample-weighted aggregation.
+    """
+    from torch.utils.data import DataLoader
+
+    users, _, _, test_data = dataset_tuple
+    # Build mapping consistent with BaseTrainer.setup_clients user-id conversion.
+    cid_to_user = {}
+    for u in users:
+        if isinstance(u, str) and len(u) >= 5:
+            uid = int(u[-5:])
+        else:
+            uid = int(u)
+        cid_to_user[uid] = u
+
+    # Temporarily switch worker to the evaluated task label space.
+    old_active_labels = trainer.worker.options.get('active_labels', None)
+    old_label_map = trainer.worker.options.get('label_map', None)
+    if bool(trainer.worker.options.get('task_aware', False)) and active_labels is not None:
+        trainer.worker.options['active_labels'] = [int(v) for v in active_labels]
+        trainer.worker.options['label_map'] = {
+            int(g): int(i) for i, g in enumerate(active_labels)
+        }
+
+    per_client = []
+    tot_correct_sum = 0.0
+    tot_loss_sum = 0.0
+    tot_num = 0
+
+    try:
+        for c in trainer.clients:
+            if c.cid not in cid_to_user:
+                continue
+            u = cid_to_user[c.cid]
+            ds = test_data.get(u, None)
+            if ds is None or len(ds) == 0:
+                continue
+
+            p = personal_models.get(c.cid, trainer.latest_model)
+            trainer.worker.set_flat_model_params(p)
+
+            dl = DataLoader(ds, batch_size=trainer.batch_size, shuffle=False)
+            tot_correct, loss = trainer.worker.local_test(dl)
+            num = len(ds)
+            acc = float(tot_correct) / float(num) if num > 0 else 0.0
+            avg_loss = float(loss) / float(num) if num > 0 else 0.0
+
+            per_client.append({
+                'cid': int(c.cid),
+                'acc': float(acc),
+                'loss': float(avg_loss),
+                'num_samples': int(num)
+            })
+
+            tot_correct_sum += float(tot_correct)
+            tot_loss_sum += float(loss)
+            tot_num += int(num)
+    finally:
+        trainer.worker.options['active_labels'] = old_active_labels
+        trainer.worker.options['label_map'] = old_label_map
+        trainer.worker.set_flat_model_params(trainer.latest_model)
+
+    if len(per_client) == 0:
+        return {'acc': 0.0, 'loss': 0.0, 'num_samples': 0, 'per_client': []}
+
+    if weighted:
+        acc = float(tot_correct_sum / float(tot_num)) if tot_num > 0 else 0.0
+        loss = float(tot_loss_sum / float(tot_num)) if tot_num > 0 else 0.0
+        num_samples = int(tot_num)
+    else:
+        acc = float(np.mean([v['acc'] for v in per_client]))
+        loss = float(np.mean([v['loss'] for v in per_client]))
+        num_samples = int(sum([v['num_samples'] for v in per_client]))
+
+    return {
+        'acc': float(acc),
+        'loss': float(loss),
+        'num_samples': int(num_samples),
+        'per_client': per_client
+    }
+
+
 def _regenerate_cl_matrices_from_summary_json(summary_path):
     """Regenerate visualization matrices from saved sequential CL summary JSON.
 
@@ -623,96 +720,102 @@ def _regenerate_cl_matrices_from_summary_json(summary_path):
             summary = json.load(f)
         algo_name = summary.get('options', {}).get('algo', 'unknown')
 
-        acc_mat = np.array(summary.get('eval_acc_matrix', []), dtype=np.float64)
-        if acc_mat.size == 0:
-            print(f'Warning: empty eval_acc_matrix in {summary_path}')
-            return
-
-        num_tasks = acc_mat.shape[0]
         base = os.path.splitext(summary_path)[0]
 
-        # 1) Regenerated accuracy matrix heatmap from JSON
-        try:
-            plt.figure(figsize=(6, 5))
-            vis = np.where(np.isnan(acc_mat), 0.0, acc_mat)
-            im = plt.imshow(vis, cmap='viridis', vmin=0.0, vmax=1.0)
-            for i in range(vis.shape[0]):
-                for j in range(vis.shape[1]):
-                    txt = '-' if np.isnan(acc_mat[i, j]) else f"{acc_mat[i, j]:.3f}"
-                    plt.text(j, i, txt, ha='center', va='center', color='white', fontsize=9)
-            plt.colorbar(im, fraction=0.046, pad=0.04)
-            ticks = np.arange(num_tasks)
-            labels = [f'T{i+1}' for i in ticks]
-            plt.xticks(ticks, labels)
-            plt.yticks(ticks, labels)
-            plt.xlabel('Evaluated Task')
-            plt.ylabel('After Training Task')
-            plt.title(f'[{algo_name}] CL Seen-Task Accuracy Matrix (from summary JSON)')
-            plt.tight_layout()
-            acc_png = base + '_regen_acc_matrix.png'
-            plt.savefig(acc_png, dpi=220)
-            plt.close()
-            print(f'>>> Saved regenerated accuracy matrix to {acc_png}')
-        except Exception as e:
-            print(f'Warning: failed to regenerate acc heatmap: {e}')
+        def _regen_one(acc_key, forgetting_key, tag):
+            acc_mat = np.array(summary.get(acc_key, []), dtype=np.float64)
+            if acc_mat.size == 0:
+                print(f'Warning: empty {acc_key} in {summary_path}')
+                return
 
-        # 2) Combined matrix: [accuracy matrix; forgetting row]
-        forgetting_dict = summary.get('forgetting', {})
-        forgetting_row = np.full((1, num_tasks), np.nan, dtype=np.float64)
-        for j in range(num_tasks):
-            v = forgetting_dict.get(f'task_{j + 1}', None)
-            if v is None:
-                continue
+            num_tasks = acc_mat.shape[0]
+            tag_suffix = f'_{tag}' if tag else ''
+
+            # 1) Accuracy matrix heatmap
             try:
-                forgetting_row[0, j] = float(v)
+                plt.figure(figsize=(6, 5))
+                vis = np.where(np.isnan(acc_mat), 0.0, acc_mat)
+                im = plt.imshow(vis, cmap='viridis', vmin=0.0, vmax=1.0)
+                for i in range(vis.shape[0]):
+                    for j in range(vis.shape[1]):
+                        txt = '-' if np.isnan(acc_mat[i, j]) else f"{acc_mat[i, j]:.3f}"
+                        plt.text(j, i, txt, ha='center', va='center', color='white', fontsize=9)
+                plt.colorbar(im, fraction=0.046, pad=0.04)
+                ticks = np.arange(num_tasks)
+                labels = [f'T{i+1}' for i in ticks]
+                plt.xticks(ticks, labels)
+                plt.yticks(ticks, labels)
+                plt.xlabel('Evaluated Task')
+                plt.ylabel('After Training Task')
+                plt.title(f'[{algo_name}] CL Seen-Task Accuracy Matrix ({tag})')
+                plt.tight_layout()
+                acc_png = base + f'_regen_acc_matrix{tag_suffix}.png'
+                plt.savefig(acc_png, dpi=220)
+                plt.close()
+                print(f'>>> Saved regenerated accuracy matrix to {acc_png}')
             except Exception as e:
-                print(f"Warning[_regenerate_cl_matrices_from_summary_json]: failed to parse forgetting for task_{j + 1} due to {type(e).__name__}: {e}")
+                print(f'Warning: failed to regenerate acc heatmap ({tag}): {e}')
 
-        combined = np.vstack([acc_mat, forgetting_row])
+            # 2) Combined matrix: [accuracy matrix; forgetting row]
+            forgetting_dict = summary.get(forgetting_key, {})
+            forgetting_row = np.full((1, num_tasks), np.nan, dtype=np.float64)
+            for j in range(num_tasks):
+                v = forgetting_dict.get(f'task_{j + 1}', None)
+                if v is None:
+                    continue
+                try:
+                    forgetting_row[0, j] = float(v)
+                except Exception as e:
+                    print(f"Warning[_regenerate_cl_matrices_from_summary_json]: failed to parse {forgetting_key} for task_{j + 1} due to {type(e).__name__}: {e}")
 
-        # Save combined numeric matrix for downstream processing
-        npy_path = base + '_acc_forgetting_matrix.npy'
-        np.save(npy_path, combined)
+            combined = np.vstack([acc_mat, forgetting_row])
 
-        csv_path = base + '_acc_forgetting_matrix.csv'
-        with open(csv_path, 'w') as cf:
-            header = ['stage/eval'] + [f'T{j+1}' for j in range(num_tasks)]
-            cf.write(','.join(header) + '\n')
-            for i in range(num_tasks):
-                vals = ['nan' if np.isnan(x) else f'{x:.6f}' for x in combined[i]]
-                cf.write(','.join([f'after_T{i+1}'] + vals) + '\n')
-            vals = ['nan' if np.isnan(x) else f'{x:.6f}' for x in combined[-1]]
-            cf.write(','.join(['forgetting'] + vals) + '\n')
+            npy_path = base + f'_acc_forgetting_matrix{tag_suffix}.npy'
+            np.save(npy_path, combined)
 
-        # Visualization for combined matrix
-        try:
-            plt.figure(figsize=(6.5, 5.5))
-            # Forgetting can be >1? normally in [0,1], use dynamic vmax for safe display
-            vis2 = np.where(np.isnan(combined), 0.0, combined)
-            vmax = max(1.0, float(np.nanmax(vis2)) if vis2.size > 0 else 1.0)
-            im = plt.imshow(vis2, cmap='magma', vmin=0.0, vmax=vmax)
-            for i in range(vis2.shape[0]):
-                for j in range(vis2.shape[1]):
-                    txt = '-' if np.isnan(combined[i, j]) else f"{combined[i, j]:.3f}"
-                    plt.text(j, i, txt, ha='center', va='center', color='white', fontsize=9)
-            plt.colorbar(im, fraction=0.046, pad=0.04)
-            xticks = np.arange(num_tasks)
-            yticks = np.arange(num_tasks + 1)
-            xlabels = [f'T{i+1}' for i in xticks]
-            ylabels = [f'after_T{i+1}' for i in range(num_tasks)] + ['forgetting']
-            plt.xticks(xticks, xlabels)
-            plt.yticks(yticks, ylabels)
-            plt.xlabel('Evaluated Task')
-            plt.ylabel('Training Stage')
-            plt.title('CL Accuracy + Forgetting Matrix (from summary JSON)')
-            plt.tight_layout()
-            combo_png = base + '_regen_acc_forgetting_matrix.png'
-            plt.savefig(combo_png, dpi=220)
-            plt.close()
-            print(f'>>> Saved regenerated acc+forgetting matrix to {combo_png}')
-            print(f'>>> Saved numeric matrices: {npy_path}, {csv_path}')
-        except Exception as e:
-            print(f'Warning: failed to regenerate combined matrix heatmap: {e}')
+            csv_path = base + f'_acc_forgetting_matrix{tag_suffix}.csv'
+            with open(csv_path, 'w') as cf:
+                header = ['stage/eval'] + [f'T{j+1}' for j in range(num_tasks)]
+                cf.write(','.join(header) + '\n')
+                for i in range(num_tasks):
+                    vals = ['nan' if np.isnan(x) else f'{x:.6f}' for x in combined[i]]
+                    cf.write(','.join([f'after_T{i+1}'] + vals) + '\n')
+                vals = ['nan' if np.isnan(x) else f'{x:.6f}' for x in combined[-1]]
+                cf.write(','.join(['forgetting'] + vals) + '\n')
+
+            try:
+                plt.figure(figsize=(6.5, 5.5))
+                vis2 = np.where(np.isnan(combined), 0.0, combined)
+                vmax = max(1.0, float(np.nanmax(vis2)) if vis2.size > 0 else 1.0)
+                im = plt.imshow(vis2, cmap='magma', vmin=0.0, vmax=vmax)
+                for i in range(vis2.shape[0]):
+                    for j in range(vis2.shape[1]):
+                        txt = '-' if np.isnan(combined[i, j]) else f"{combined[i, j]:.3f}"
+                        plt.text(j, i, txt, ha='center', va='center', color='white', fontsize=9)
+                plt.colorbar(im, fraction=0.046, pad=0.04)
+                xticks = np.arange(num_tasks)
+                yticks = np.arange(num_tasks + 1)
+                xlabels = [f'T{i+1}' for i in xticks]
+                ylabels = [f'after_T{i+1}' for i in range(num_tasks)] + ['forgetting']
+                plt.xticks(xticks, xlabels)
+                plt.yticks(yticks, ylabels)
+                plt.xlabel('Evaluated Task')
+                plt.ylabel('Training Stage')
+                plt.title(f'CL Accuracy + Forgetting Matrix ({tag})')
+                plt.tight_layout()
+                combo_png = base + f'_regen_acc_forgetting_matrix{tag_suffix}.png'
+                plt.savefig(combo_png, dpi=220)
+                plt.close()
+                print(f'>>> Saved regenerated acc+forgetting matrix to {combo_png}')
+                print(f'>>> Saved numeric matrices: {npy_path}, {csv_path}')
+            except Exception as e:
+                print(f'Warning: failed to regenerate combined matrix heatmap ({tag}): {e}')
+
+        _regen_one('eval_acc_matrix_global', 'forgetting_global', 'global')
+        _regen_one('eval_acc_matrix_personalized', 'forgetting_personalized', 'personalized')
+        # Backward compatibility for old summaries that only have global keys.
+        if 'eval_acc_matrix_global' not in summary and 'eval_acc_matrix' in summary:
+            _regen_one('eval_acc_matrix', 'forgetting', 'global')
     except Exception as e:
         print(f'Warning: failed to parse summary JSON for matrix regeneration: {e}')
 
@@ -729,8 +832,10 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
     prev_global_model = None
     prev_client_state = None
     task_summaries = []
-    eval_acc_matrix = np.full((len(task_datasets), len(task_datasets)), np.nan, dtype=np.float64)
-    eval_loss_matrix = np.full((len(task_datasets), len(task_datasets)), np.nan, dtype=np.float64)
+    eval_acc_matrix_global = np.full((len(task_datasets), len(task_datasets)), np.nan, dtype=np.float64)
+    eval_loss_matrix_global = np.full((len(task_datasets), len(task_datasets)), np.nan, dtype=np.float64)
+    eval_acc_matrix_personalized = np.full((len(task_datasets), len(task_datasets)), np.nan, dtype=np.float64)
+    eval_loss_matrix_personalized = np.full((len(task_datasets), len(task_datasets)), np.nan, dtype=np.float64)
 
     for task_idx, task_dataset in enumerate(task_datasets, start=1):
         task_options = dict(options)
@@ -771,17 +876,43 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
 
         # CL seen-task evaluation: after task t, evaluate on tasks 1..t
         stage_eval = {}
+        has_personal_models = hasattr(trainer, 'personal_models') and isinstance(trainer.personal_models, dict)
+        if not has_personal_models:
+            print(f"Warning[_run_sequential_tasks]: trainer {type(trainer).__name__} has no personal_models; personalized CL matrix will use NaN.")
         for eval_task_idx in range(task_idx):
-            eval_ret = _evaluate_global_on_dataset(trainer,
-                                                   task_datasets[eval_task_idx],
-                                                   trainer.latest_model,
-                                                   active_labels=task_label_lists[eval_task_idx])
-            eval_acc_matrix[task_idx - 1, eval_task_idx] = eval_ret['acc']
-            eval_loss_matrix[task_idx - 1, eval_task_idx] = eval_ret['loss']
+            eval_ret_global = _evaluate_global_on_dataset(
+                trainer,
+                task_datasets[eval_task_idx],
+                trainer.latest_model,
+                active_labels=task_label_lists[eval_task_idx]
+            )
+            eval_acc_matrix_global[task_idx - 1, eval_task_idx] = eval_ret_global['acc']
+            eval_loss_matrix_global[task_idx - 1, eval_task_idx] = eval_ret_global['loss']
+
+            if has_personal_models:
+                eval_ret_personal = _evaluate_personal_on_dataset(
+                    trainer,
+                    task_datasets[eval_task_idx],
+                    trainer.personal_models,
+                    active_labels=task_label_lists[eval_task_idx],
+                    weighted=True
+                )
+                eval_acc_matrix_personalized[task_idx - 1, eval_task_idx] = eval_ret_personal['acc']
+                eval_loss_matrix_personalized[task_idx - 1, eval_task_idx] = eval_ret_personal['loss']
+            else:
+                eval_ret_personal = {'acc': np.nan, 'loss': np.nan, 'num_samples': 0, 'per_client': []}
+
             stage_eval[f'task_{eval_task_idx + 1}'] = {
-                'acc': float(eval_ret['acc']),
-                'loss': float(eval_ret['loss']),
-                'num_samples': int(eval_ret['num_samples'])
+                'global': {
+                    'acc': float(eval_ret_global['acc']),
+                    'loss': float(eval_ret_global['loss']),
+                    'num_samples': int(eval_ret_global['num_samples'])
+                },
+                'personalized': {
+                    'acc': None if np.isnan(eval_ret_personal['acc']) else float(eval_ret_personal['acc']),
+                    'loss': None if np.isnan(eval_ret_personal['loss']) else float(eval_ret_personal['loss']),
+                    'num_samples': int(eval_ret_personal['num_samples'])
+                }
             }
 
         # Save stage-level seen-task eval into current task folder
@@ -815,22 +946,25 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
             'seen_task_eval': stage_eval
         })
 
-    # Forgetting statistics from seen-task accuracy matrix
-    final_stage = len(task_datasets) - 1
-    forgetting = {}
-    forgetting_vals = []
-    for j in range(len(task_datasets)):
-        diag = eval_acc_matrix[j, j] if j <= final_stage else np.nan
-        final_acc = eval_acc_matrix[final_stage, j]
-        if np.isnan(diag) or np.isnan(final_acc):
-            forgetting[f'task_{j + 1}'] = None
-            continue
-        fj = float(diag - final_acc)
-        forgetting[f'task_{j + 1}'] = fj
-        if j < final_stage:
-            forgetting_vals.append(fj)
+    def _compute_forgetting(acc_matrix):
+        final_stage = acc_matrix.shape[0] - 1
+        forgetting_dict = {}
+        forgetting_vals = []
+        for j in range(acc_matrix.shape[1]):
+            diag = acc_matrix[j, j] if j <= final_stage else np.nan
+            final_acc = acc_matrix[final_stage, j]
+            if np.isnan(diag) or np.isnan(final_acc):
+                forgetting_dict[f'task_{j + 1}'] = None
+                continue
+            fj = float(diag - final_acc)
+            forgetting_dict[f'task_{j + 1}'] = fj
+            if j < final_stage:
+                forgetting_vals.append(fj)
+        mean_f = float(np.mean(forgetting_vals)) if len(forgetting_vals) > 0 else 0.0
+        return forgetting_dict, mean_f
 
-    mean_forgetting = float(np.mean(forgetting_vals)) if len(forgetting_vals) > 0 else 0.0
+    forgetting_global, mean_forgetting_global = _compute_forgetting(eval_acc_matrix_global)
+    forgetting_personalized, mean_forgetting_personalized = _compute_forgetting(eval_acc_matrix_personalized)
 
     summary_path = os.path.join('result', f"{options['dataset']}_cl{len(task_datasets)}_sequential_summary_{time.strftime('%Y-%m-%dT%H-%M-%S')}.json")
     os.makedirs(os.path.dirname(summary_path), exist_ok=True)
@@ -839,44 +973,63 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
         json.dump({'options': options,
                    'tasks': task_summaries,
                    'labels_per_task': task_label_lists,
-                   'eval_acc_matrix': eval_acc_matrix.tolist(),
-                   'eval_loss_matrix': eval_loss_matrix.tolist(),
-                   'forgetting': forgetting,
-                   'mean_forgetting': mean_forgetting}, sf, indent=2)
+                   # Backward-compatible aliases (global metrics)
+                   'eval_acc_matrix': eval_acc_matrix_global.tolist(),
+                   'eval_loss_matrix': eval_loss_matrix_global.tolist(),
+                   'forgetting': forgetting_global,
+                   'mean_forgetting': mean_forgetting_global,
+                   # Explicit global/personalized matrices
+                   'eval_acc_matrix_global': eval_acc_matrix_global.tolist(),
+                   'eval_loss_matrix_global': eval_loss_matrix_global.tolist(),
+                   'eval_acc_matrix_personalized': eval_acc_matrix_personalized.tolist(),
+                   'eval_loss_matrix_personalized': eval_loss_matrix_personalized.tolist(),
+                   'forgetting_global': forgetting_global,
+                   'mean_forgetting_global': mean_forgetting_global,
+                   'forgetting_personalized': forgetting_personalized,
+                   'mean_forgetting_personalized': mean_forgetting_personalized}, sf, indent=2)
     print(f'>>> Saved sequential CL summary to {summary_path}')
 
     # Regenerate matrices from the saved summary JSON for easier inspection
     _regenerate_cl_matrices_from_summary_json(summary_path)
 
+    ts = time.strftime('%Y-%m-%dT%H-%M-%S')
     # Save matrix as npy for easier downstream analysis
-    np.save(os.path.join('result', f"{options['dataset']}_cl_acc_matrix_{time.strftime('%Y-%m-%dT%H-%M-%S')}.npy"),
-            eval_acc_matrix)
+    np.save(os.path.join('result', f"{options['dataset']}_cl_acc_matrix_{ts}.npy"),
+            eval_acc_matrix_global)
+    np.save(os.path.join('result', f"{options['dataset']}_cl_acc_matrix_global_{ts}.npy"),
+            eval_acc_matrix_global)
+    np.save(os.path.join('result', f"{options['dataset']}_cl_acc_matrix_personalized_{ts}.npy"),
+            eval_acc_matrix_personalized)
 
-    # Optional heatmap
-    try:
-        import matplotlib.pyplot as plt
-        plt.figure(figsize=(6, 5))
-        vis = np.where(np.isnan(eval_acc_matrix), 0.0, eval_acc_matrix)
-        im = plt.imshow(vis, cmap='viridis', vmin=0.0, vmax=1.0)
-        for i in range(vis.shape[0]):
-            for j in range(vis.shape[1]):
-                txt = '-' if np.isnan(eval_acc_matrix[i, j]) else f"{eval_acc_matrix[i, j]:.3f}"
-                plt.text(j, i, txt, ha='center', va='center', color='white', fontsize=9)
-        plt.colorbar(im, fraction=0.046, pad=0.04)
-        plt.xlabel('Evaluated Task')
-        plt.ylabel('After Training Task')
-        plt.title(f'[{options.get("algo", "unknown")}] Sequential CL Seen-Task Accuracy Matrix')
-        ticks = np.arange(len(task_datasets))
-        labels = [f'T{i+1}' for i in ticks]
-        plt.xticks(ticks, labels)
-        plt.yticks(ticks, labels)
-        plt.tight_layout()
-        heat_path = os.path.join('result', f"{options['dataset']}_cl_acc_matrix_{time.strftime('%Y-%m-%dT%H-%M-%S')}.png")
-        plt.savefig(heat_path, dpi=200)
-        plt.close()
-        print(f'>>> Saved CL accuracy matrix heatmap to {heat_path}')
-    except Exception as e:
-        print(f'Warning: failed to save CL matrix heatmap: {e}')
+    def _save_cl_heatmap(acc_matrix, tag):
+        try:
+            import matplotlib.pyplot as plt
+            plt.figure(figsize=(6, 5))
+            vis = np.where(np.isnan(acc_matrix), 0.0, acc_matrix)
+            im = plt.imshow(vis, cmap='viridis', vmin=0.0, vmax=1.0)
+            for i in range(vis.shape[0]):
+                for j in range(vis.shape[1]):
+                    txt = '-' if np.isnan(acc_matrix[i, j]) else f"{acc_matrix[i, j]:.3f}"
+                    plt.text(j, i, txt, ha='center', va='center', color='white', fontsize=9)
+            plt.colorbar(im, fraction=0.046, pad=0.04)
+            plt.xlabel('Evaluated Task')
+            plt.ylabel('After Training Task')
+            plt.title(f'[{options.get("algo", "unknown")}] Sequential CL Seen-Task Accuracy Matrix ({tag})')
+            ticks = np.arange(len(task_datasets))
+            labels = [f'T{i+1}' for i in ticks]
+            plt.xticks(ticks, labels)
+            plt.yticks(ticks, labels)
+            plt.tight_layout()
+            heat_path = os.path.join('result', f"{options['dataset']}_cl_acc_matrix_{tag}_{ts}.png")
+            plt.savefig(heat_path, dpi=200)
+            plt.close()
+            print(f'>>> Saved CL accuracy matrix heatmap ({tag}) to {heat_path}')
+        except Exception as e:
+            print(f'Warning: failed to save CL matrix heatmap ({tag}): {e}')
+
+    # Keep legacy global heatmap + add explicit global/personalized heatmaps
+    _save_cl_heatmap(eval_acc_matrix_global, 'global')
+    _save_cl_heatmap(eval_acc_matrix_personalized, 'personalized')
 
 
 def main():

@@ -4,6 +4,16 @@ from src.optimizers.gd import GD
 
 
 class DittoTrainer(BaseTrainer):
+    """Ditto trainer with persistent personalized models.
+
+    Notes:
+    - Global branch follows standard FL local training + aggregation.
+    - Personalized branch performs proximal local optimization around current
+      global model using each client's persistent personal model as init.
+    - `lambda_old` and other CL-related options are framework-level extensions.
+      Set `lambda_old=0` to recover plain Ditto-style personalized objective.
+    """
+
     def __init__(self, options, dataset):
         model = choose_model(options)
         self.move_model_to_gpu(model, options)
@@ -13,10 +23,44 @@ class DittoTrainer(BaseTrainer):
 
         # personalization regularizer
         self.lambda_p = options.get('lambda_p', 0.1)
+        # Independent local budget for personalized branch.
+        # Fallback is aligned in main.read_options, keep this guard for robustness.
+        self.personal_num_epoch = int(options.get('personal_num_epoch', options.get('num_epoch', 1)))
+        if self.personal_num_epoch <= 0:
+            print(
+                f"Warning[DittoTrainer.__init__]: invalid personal_num_epoch={self.personal_num_epoch}, "
+                f"fallback to num_epoch={options.get('num_epoch', 1)}"
+            )
+            self.personal_num_epoch = int(options.get('num_epoch', 1))
 
         # initialize personal models for each client (flat tensors)
         init_flat = self.worker.get_flat_model_params().detach()
         self.personal_models = {c.cid: init_flat.clone() for c in self.clients}
+
+    def export_client_state(self):
+        """Export per-client personal states for sequential CL task transfer."""
+        return {
+            'personal_models': {cid: v.detach().clone() for cid, v in self.personal_models.items()}
+        }
+
+    def import_client_state(self, state):
+        """Restore per-client personal states for sequential CL task transfer."""
+        if not isinstance(state, dict):
+            print("Warning[DittoTrainer.import_client_state]: invalid state type, skip restore.")
+            return
+
+        src = state.get('personal_models', {})
+        if not isinstance(src, dict):
+            print("Warning[DittoTrainer.import_client_state]: invalid `personal_models`, skip restore.")
+            return
+
+        restored = {}
+        for c in self.clients:
+            if c.cid in src:
+                restored[c.cid] = src[c.cid].detach().clone()
+            else:
+                restored[c.cid] = self.latest_model.detach().clone()
+        self.personal_models = restored
 
     def train(self):
         print('>>> Select {} clients per round \n'.format(self.clients_per_round))
@@ -38,31 +82,48 @@ class DittoTrainer(BaseTrainer):
 
             # Aggregate global model
             self.latest_model = self.aggregate(solns)
+            print('=' * 102 + "\n")
 
             # Personalization: update personalized model for selected clients
-            for c in selected_clients:
+            # Ditto-specific: use an independent local budget (`personal_num_epoch`)
+            # for personalized proximal optimization.
+            global_anchor = self.latest_model.detach().clone()
+            for i, c in enumerate(selected_clients, start=1):
                 # Load current personal model into worker
                 personal = self.personal_models.get(c.cid)
                 if personal is None:
-                    personal = self.latest_model.clone()
+                    personal = global_anchor.clone()
                 # Set client's personalized model into the shared worker for local update
                 c.set_flat_model_params(personal)
 
                 # Run local training with proximal term towards current global model
                 # Using worker.local_train directly (returns flat solution and stats)
+                old_num_epoch = self.worker.num_epoch
                 try:
-                    # Run local training for personalization (prox to global)
-                    local_solution, _ = self.worker.local_train(c.train_dataloader,
-                                                                prox_mu=self.lambda_p,
-                                                                global_params=self.latest_model)
+                    self.worker.num_epoch = int(self.personal_num_epoch)
+                    # Run local training for personalization (prox to current global anchor)
+                    soln_personal, local_stats = c.local_train(
+                        prox_mu=self.lambda_p,
+                        global_params=global_anchor
+                    )
+                    _, local_solution = soln_personal
+                    if self.print_result:
+                        print("(Private) Round: {:>2d} | CID: {: >3d} ({:>2d}/{:>2d})| "
+                            "Param: norm {:>.4f} ({:>.4f}->{:>.4f})| "
+                            "Loss {:>.4f} | Acc {:>5.2f}% | Time: {:>.2f}s".format(
+                            round_i, c.cid, i, self.clients_per_round,
+                            local_stats['norm'], local_stats['min'], local_stats['max'],
+                            local_stats['loss'], local_stats['acc']*100, local_stats['time']))
                     # Save updated personal model (flat tensor)
-                    self.personal_models[c.cid] = local_solution.detach()
+                    self.personal_models[c.cid] = local_solution.detach().clone()
 
                     # (defer evaluation of personalized models until after all personal updates)
                     pass
                 except Exception as e:
                     # If personalization fails for any client, skip and keep previous personal model
                     print(f"Warning[DittoTrainer.train]: round={round_i}, cid={c.cid}, personalization failed due to {type(e).__name__}: {e}")
+                finally:
+                    self.worker.num_epoch = old_num_epoch
 
             # After personalization updates, evaluate personalized models for ALL clients
             personal_losses = []

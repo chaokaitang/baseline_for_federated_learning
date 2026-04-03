@@ -110,7 +110,7 @@ class BaseTrainer(object):
             # Solve minimization locally (pass through optional kwargs)
             soln, stat = c.local_train(**kwargs)
             if self.print_result:
-                print("Round: {:>2d} | CID: {: >3d} ({:>2d}/{:>2d})| "
+                print("(global)  Round: {:>2d} | CID: {: >3d} ({:>2d}/{:>2d})| "
                       "Param: norm {:>.4f} ({:>.4f}->{:>.4f})| "
                       "Loss {:>.4f} | Acc {:>5.2f}% | Time: {:>.2f}s".format(
                        round_i, c.cid, i, self.clients_per_round,

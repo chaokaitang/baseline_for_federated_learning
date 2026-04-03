@@ -81,14 +81,11 @@ class Worker(object):
         idx = torch.tensor(active_labels, device=pred.device, dtype=torch.long)
         pred_sliced = pred.index_select(1, idx)
 
-        # Remap global labels to local labels
-        label_map = self.options.get('label_map', None)
-        if label_map is None:
-            label_map = {int(g): int(i) for i, g in enumerate(active_labels)}
-
-        y_cpu = y.detach().cpu().numpy().tolist()
-        y_local_list = [label_map[int(v)] for v in y_cpu]
-        y_local = torch.tensor(y_local_list, device=pred.device, dtype=torch.long)
+        # Remap global labels to local labels on device (avoid CPU numpy conversion each batch)
+        # Build a lookup table over global class dimension for fast vectorized remap.
+        map_tensor = torch.full((pred.size(1),), -1, device=pred.device, dtype=torch.long)
+        map_tensor[idx] = torch.arange(idx.numel(), device=pred.device, dtype=torch.long)
+        y_local = map_tensor[y.long()]
         return pred_sliced, y_local
 
     def get_flat_grads(self, dataloader):
@@ -157,9 +154,9 @@ class Worker(object):
                             prev_flat = prev_flat.to(current_flat.device)
                         reg_loss_old = torch.sum((current_flat - prev_flat) ** 2)
                         loss = loss + lambda_old * reg_loss_old
-                        # if not printed_reg_once:
-                        #     print(f'>>> old-model reg enabled: lambda_old={lambda_old}, reg_loss={reg_loss_old.item():.6f}')
-                        #     printed_reg_once = True
+                        if not printed_reg_once:
+                            print(f'>>> old-model reg enabled: lambda_old={lambda_old}, reg_loss={reg_loss_old.item():.6f}')
+                            printed_reg_once = True
                     except Exception as e:
                         # Keep baseline behavior if shape/device alignment fails
                         print(f"Warning[Worker.local_train]: old-model regularization skipped due to {type(e).__name__}: {e}")
@@ -180,7 +177,7 @@ class Worker(object):
                         loss = loss + prox
                     except Exception as e:
                         # If shapes mismatch, skip proximal term (user should ensure correct shapes)
-                        print(f"Warning[Worker.local_train]: FedProx proximal term skipped due to {type(e).__name__}: {e}")
+                        print(f"Warning[Worker.local_train]: FedProx proximal term skipped due to {type(e).__name__}: {e}")            
 
                 # Generic algorithm hook: trainer can inject extra regularization terms here
                 loss_hook = kwargs.get('loss_hook', None)

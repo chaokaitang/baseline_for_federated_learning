@@ -707,6 +707,118 @@ def _evaluate_personal_on_dataset(trainer, dataset_tuple, personal_models, activ
     }
 
 
+def _evaluate_collab_on_dataset(trainer, dataset_tuple, personal_models, active_labels=None, weighted=True):
+    """Evaluate collaborative (global/personal beta-mixed) outputs on a task dataset tuple."""
+    from torch.utils.data import DataLoader
+    import torch.nn as nn
+
+    users, _, _, test_data = dataset_tuple
+
+    # Build mapping consistent with BaseTrainer.setup_clients user-id conversion.
+    cid_to_user = {}
+    for u in users:
+        if isinstance(u, str) and len(u) >= 5:
+            uid = int(u[-5:])
+        else:
+            uid = int(u)
+        cid_to_user[uid] = u
+
+    old_active_labels = trainer.worker.options.get('active_labels', None)
+    old_label_map = trainer.worker.options.get('label_map', None)
+    if bool(trainer.worker.options.get('task_aware', False)) and active_labels is not None:
+        trainer.worker.options['active_labels'] = [int(v) for v in active_labels]
+        trainer.worker.options['label_map'] = {
+            int(g): int(i) for i, g in enumerate(active_labels)
+        }
+
+    global_flat = trainer.latest_model.detach().clone()
+    criterion = nn.CrossEntropyLoss()
+    per_client = []
+    tot_correct_sum = 0.0
+    tot_loss_sum = 0.0
+    tot_num = 0
+
+    try:
+        for c in trainer.clients:
+            if c.cid not in cid_to_user:
+                continue
+            u = cid_to_user[c.cid]
+            ds = test_data.get(u, None)
+            if ds is None or len(ds) == 0:
+                continue
+
+            personal_flat = personal_models.get(c.cid, trainer.latest_model).detach().clone()
+            beta = float(getattr(trainer, 'client_betas', {}).get(c.cid, trainer.options.get('beta_fixed', 0.5)))
+
+            dl = DataLoader(ds, batch_size=trainer.batch_size, shuffle=False)
+            total = 0
+            total_correct = 0
+            total_loss = 0.0
+
+            with torch.no_grad():
+                for x, y in dl:
+                    x = trainer.worker.flatten_data(x)
+                    if trainer.gpu:
+                        x, y = x.cuda(), y.cuda()
+
+                    trainer.worker.set_flat_model_params(global_flat)
+                    pred_g = trainer.worker.model(x)
+                    trainer.worker.set_flat_model_params(personal_flat)
+                    pred_p = trainer.worker.model(x)
+
+                    pred_mix = (1.0 - beta) * pred_g + beta * pred_p
+                    pred_mix, y_local = trainer.worker._apply_task_aware_logits_labels(pred_mix, y)
+
+                    loss = criterion(pred_mix, y_local)
+                    _, pred_label = torch.max(pred_mix, 1)
+                    correct = pred_label.eq(y_local).sum().item()
+
+                    bs = y_local.size(0)
+                    total += bs
+                    total_correct += correct
+                    total_loss += float(loss.item()) * bs
+
+            if total == 0:
+                continue
+
+            acc = float(total_correct) / float(total)
+            avg_loss = float(total_loss) / float(total)
+            per_client.append({
+                'cid': int(c.cid),
+                'beta': float(beta),
+                'acc': float(acc),
+                'loss': float(avg_loss),
+                'num_samples': int(total)
+            })
+
+            tot_correct_sum += float(total_correct)
+            tot_loss_sum += float(total_loss)
+            tot_num += int(total)
+    finally:
+        trainer.worker.options['active_labels'] = old_active_labels
+        trainer.worker.options['label_map'] = old_label_map
+        trainer.worker.set_flat_model_params(trainer.latest_model)
+
+    if len(per_client) == 0:
+        return {'acc': 0.0, 'loss': 0.0, 'num_samples': 0, 'per_client': []}
+
+    if weighted:
+        acc = float(tot_correct_sum / float(tot_num)) if tot_num > 0 else 0.0
+        loss = float(tot_loss_sum / float(tot_num)) if tot_num > 0 else 0.0
+        num_samples = int(tot_num)
+    else:
+        acc = float(np.mean([v['acc'] for v in per_client]))
+        loss = float(np.mean([v['loss'] for v in per_client]))
+        num_samples = int(sum([v['num_samples'] for v in per_client]))
+
+    return {
+        'acc': float(acc),
+        'loss': float(loss),
+        'num_samples': int(num_samples),
+        'per_client': per_client
+    }
+
+
 def _regenerate_cl_matrices_from_summary_json(summary_path):
     """Regenerate visualization matrices from saved sequential CL summary JSON.
 
@@ -813,6 +925,7 @@ def _regenerate_cl_matrices_from_summary_json(summary_path):
 
         _regen_one('eval_acc_matrix_global', 'forgetting_global', 'global')
         _regen_one('eval_acc_matrix_personalized', 'forgetting_personalized', 'personalized')
+        _regen_one('eval_acc_matrix_collab_beta', 'forgetting_collab_beta', 'collab-beta')
         # Backward compatibility for old summaries that only have global keys.
         if 'eval_acc_matrix_global' not in summary and 'eval_acc_matrix' in summary:
             _regen_one('eval_acc_matrix', 'forgetting', 'global')
@@ -836,6 +949,8 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
     eval_loss_matrix_global = np.full((len(task_datasets), len(task_datasets)), np.nan, dtype=np.float64)
     eval_acc_matrix_personalized = np.full((len(task_datasets), len(task_datasets)), np.nan, dtype=np.float64)
     eval_loss_matrix_personalized = np.full((len(task_datasets), len(task_datasets)), np.nan, dtype=np.float64)
+    eval_acc_matrix_collab_beta = np.full((len(task_datasets), len(task_datasets)), np.nan, dtype=np.float64)
+    eval_loss_matrix_collab_beta = np.full((len(task_datasets), len(task_datasets)), np.nan, dtype=np.float64)
 
     for task_idx, task_dataset in enumerate(task_datasets, start=1):
         task_options = dict(options)
@@ -877,8 +992,11 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
         # CL seen-task evaluation: after task t, evaluate on tasks 1..t
         stage_eval = {}
         has_personal_models = hasattr(trainer, 'personal_models') and isinstance(trainer.personal_models, dict)
+        has_collab_eval = has_personal_models and hasattr(trainer, 'client_betas') and isinstance(trainer.client_betas, dict)
         if not has_personal_models:
             print(f"Warning[_run_sequential_tasks]: trainer {type(trainer).__name__} has no personal_models; personalized CL matrix will use NaN.")
+        if has_personal_models and not has_collab_eval:
+            print(f"Warning[_run_sequential_tasks]: trainer {type(trainer).__name__} has no client_betas; collab-beta CL matrix will use NaN.")
         for eval_task_idx in range(task_idx):
             eval_ret_global = _evaluate_global_on_dataset(
                 trainer,
@@ -902,6 +1020,19 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
             else:
                 eval_ret_personal = {'acc': np.nan, 'loss': np.nan, 'num_samples': 0, 'per_client': []}
 
+            if has_collab_eval:
+                eval_ret_collab = _evaluate_collab_on_dataset(
+                    trainer,
+                    task_datasets[eval_task_idx],
+                    trainer.personal_models,
+                    active_labels=task_label_lists[eval_task_idx],
+                    weighted=True
+                )
+                eval_acc_matrix_collab_beta[task_idx - 1, eval_task_idx] = eval_ret_collab['acc']
+                eval_loss_matrix_collab_beta[task_idx - 1, eval_task_idx] = eval_ret_collab['loss']
+            else:
+                eval_ret_collab = {'acc': np.nan, 'loss': np.nan, 'num_samples': 0, 'per_client': []}
+
             stage_eval[f'task_{eval_task_idx + 1}'] = {
                 'global': {
                     'acc': float(eval_ret_global['acc']),
@@ -912,6 +1043,11 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
                     'acc': None if np.isnan(eval_ret_personal['acc']) else float(eval_ret_personal['acc']),
                     'loss': None if np.isnan(eval_ret_personal['loss']) else float(eval_ret_personal['loss']),
                     'num_samples': int(eval_ret_personal['num_samples'])
+                },
+                'collab_beta': {
+                    'acc': None if np.isnan(eval_ret_collab['acc']) else float(eval_ret_collab['acc']),
+                    'loss': None if np.isnan(eval_ret_collab['loss']) else float(eval_ret_collab['loss']),
+                    'num_samples': int(eval_ret_collab['num_samples'])
                 }
             }
 
@@ -965,6 +1101,7 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
 
     forgetting_global, mean_forgetting_global = _compute_forgetting(eval_acc_matrix_global)
     forgetting_personalized, mean_forgetting_personalized = _compute_forgetting(eval_acc_matrix_personalized)
+    forgetting_collab_beta, mean_forgetting_collab_beta = _compute_forgetting(eval_acc_matrix_collab_beta)
 
     summary_path = os.path.join('result', f"{options['dataset']}_cl{len(task_datasets)}_sequential_summary_{time.strftime('%Y-%m-%dT%H-%M-%S')}.json")
     os.makedirs(os.path.dirname(summary_path), exist_ok=True)
@@ -983,10 +1120,14 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
                    'eval_loss_matrix_global': eval_loss_matrix_global.tolist(),
                    'eval_acc_matrix_personalized': eval_acc_matrix_personalized.tolist(),
                    'eval_loss_matrix_personalized': eval_loss_matrix_personalized.tolist(),
+                   'eval_acc_matrix_collab_beta': eval_acc_matrix_collab_beta.tolist(),
+                   'eval_loss_matrix_collab_beta': eval_loss_matrix_collab_beta.tolist(),
                    'forgetting_global': forgetting_global,
                    'mean_forgetting_global': mean_forgetting_global,
                    'forgetting_personalized': forgetting_personalized,
-                   'mean_forgetting_personalized': mean_forgetting_personalized}, sf, indent=2)
+                   'mean_forgetting_personalized': mean_forgetting_personalized,
+                   'forgetting_collab_beta': forgetting_collab_beta,
+                   'mean_forgetting_collab_beta': mean_forgetting_collab_beta}, sf, indent=2)
     print(f'>>> Saved sequential CL summary to {summary_path}')
 
     # Regenerate matrices from the saved summary JSON for easier inspection
@@ -1000,6 +1141,8 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
             eval_acc_matrix_global)
     np.save(os.path.join('result', f"{options['dataset']}_cl_acc_matrix_personalized_{ts}.npy"),
             eval_acc_matrix_personalized)
+    np.save(os.path.join('result', f"{options['dataset']}_cl_acc_matrix_collab_beta_{ts}.npy"),
+            eval_acc_matrix_collab_beta)
 
     def _save_cl_heatmap(acc_matrix, tag):
         try:
@@ -1030,6 +1173,7 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
     # Keep legacy global heatmap + add explicit global/personalized heatmaps
     _save_cl_heatmap(eval_acc_matrix_global, 'global')
     _save_cl_heatmap(eval_acc_matrix_personalized, 'personalized')
+    _save_cl_heatmap(eval_acc_matrix_collab_beta, 'collab-beta')
 
 
 def main():

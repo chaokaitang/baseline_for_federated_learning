@@ -299,10 +299,11 @@ class STPFedCLTrainer(BaseTrainer):
             solns, stats = self.local_train(round_i, selected_clients)
             self.metrics.extend_commu_stats(round_i, stats)
             self.latest_model = self.aggregate(solns)
+            print('=' * 102 + "\n")
 
             # Branch B: personalized update with spatio-temporal regularization
             global_anchor = self.latest_model.detach().clone()
-            for c in selected_clients:
+            for i, c in enumerate(selected_clients, start=1):
                 personal = self.personal_models.get(c.cid, global_anchor).detach().clone()
                 c.set_flat_model_params(personal)
 
@@ -314,7 +315,15 @@ class STPFedCLTrainer(BaseTrainer):
                                                            round_i=round_i,
                                                            cid=c.cid)
 
-                local_solution, _ = self.worker.local_train(c.train_dataloader, loss_hook=loss_hook)
+                soln_personal, local_stats = c.local_train(loss_hook=loss_hook)
+                _, local_solution = soln_personal
+                if self.print_result:
+                    print("(Private) Round: {:>2d} | CID: {: >3d} ({:>2d}/{:>2d})| "
+                        "Param: norm {:>.4f} ({:>.4f}->{:>.4f})| "
+                        "Loss {:>.4f} | Acc {:>5.2f}% | Time: {:>.2f}s".format(
+                        round_i, c.cid, i, self.clients_per_round,
+                        local_stats['norm'], local_stats['min'], local_stats['max'],
+                        local_stats['loss'], local_stats['acc'] * 100, local_stats['time']))
                 self.personal_models[c.cid] = local_solution.detach().clone()
                 self._update_client_memories(c.cid, local_solution)
 

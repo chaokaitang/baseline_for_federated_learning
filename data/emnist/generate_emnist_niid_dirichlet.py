@@ -1,8 +1,11 @@
 """
-EMNIST-balanced Dirichlet Non-IID Data Generator.
+EMNIST-balanced Task-wise Dirichlet Non-IID Data Generator.
 
-This script keeps the existing shard-based generator untouched and adds a
-Dirichlet-based non-IID partition with CLI arguments.
+Key properties:
+1. Split labels into tasks first.
+2. Apply class-wise Dirichlet partition on train inside each task.
+3. Allocate test inside each task by matching train client-class counts.
+4. Enforce quality constraints per client per task.
 """
 
 import argparse
@@ -12,9 +15,7 @@ import pickle
 import struct
 from typing import List, Tuple
 
-import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
 import torch
 from torchvision import datasets
 
@@ -39,7 +40,7 @@ class ImageDataset(object):
 
         if not isinstance(labels, np.ndarray):
             labels = np.array(labels)
-        self.target = labels
+        self.target = labels.astype(np.int64)
 
     def __len__(self):
         return len(self.target)
@@ -178,8 +179,8 @@ def alpha_tag(alpha: float) -> str:
     return text.replace(".", "p").replace("-", "m")
 
 
-def dirichlet_counts(num_samples: int, proportions: np.ndarray) -> np.ndarray:
-    """Convert class proportions into integer counts that sum to num_samples."""
+def integer_counts(num_samples: int, proportions: np.ndarray) -> np.ndarray:
+    """Convert proportions to integer counts that sum to num_samples."""
     if num_samples == 0:
         return np.zeros_like(proportions, dtype=np.int64)
 
@@ -193,86 +194,175 @@ def dirichlet_counts(num_samples: int, proportions: np.ndarray) -> np.ndarray:
     return counts
 
 
-def sample_dirichlet_partition_indices(
+def _sample_task_dirichlet_train_indices(
     labels: np.ndarray,
+    candidate_indices: np.ndarray,
+    class_values: np.ndarray,
     num_users: int,
-    num_classes: int,
     alpha: float,
     rng: np.random.RandomState,
 ) -> List[List[int]]:
-    """Partition sample indices by class with class-wise Dirichlet proportions."""
     user_indices = [[] for _ in range(num_users)]
-    for cls in range(num_classes):
-        cls_indices = np.where(labels == cls)[0]
+
+    for cls in class_values:
+        cls_indices = candidate_indices[labels[candidate_indices] == int(cls)]
         if len(cls_indices) == 0:
             continue
 
-        rng.shuffle(cls_indices)
+        shuffled = cls_indices.copy()
+        rng.shuffle(shuffled)
         proportions = rng.dirichlet(np.ones(num_users) * alpha)
-        counts = dirichlet_counts(len(cls_indices), proportions)
+        counts = integer_counts(len(shuffled), proportions)
 
         start = 0
         for uid, cnt in enumerate(counts):
             if cnt <= 0:
                 continue
             end = start + int(cnt)
-            user_indices[uid].extend(cls_indices[start:end].tolist())
+            user_indices[uid].extend(shuffled[start:end].tolist())
             start = end
-    return user_indices
-
-
-def repair_empty_clients(user_indices: List[List[int]], rng: np.random.RandomState) -> List[List[int]]:
-    """Move samples from data-rich clients to empty ones as a final fallback."""
-    counts = np.array([len(v) for v in user_indices], dtype=np.int64)
-    empty_clients = np.where(counts == 0)[0].tolist()
-    if not empty_clients:
-        return user_indices
-
-    for empty_uid in empty_clients:
-        donor_order = np.argsort(-counts)
-        donated = False
-        for donor_uid in donor_order:
-            if counts[donor_uid] <= 1:
-                continue
-            pick_pos = int(rng.randint(0, len(user_indices[donor_uid])))
-            moved_idx = user_indices[donor_uid].pop(pick_pos)
-            user_indices[empty_uid].append(moved_idx)
-            counts[donor_uid] -= 1
-            counts[empty_uid] += 1
-            donated = True
-            break
-        if not donated:
-            raise RuntimeError("Unable to repair empty clients because all clients have <= 1 sample.")
 
     return user_indices
 
 
-def build_non_overlapping_user_data(
-    data: np.ndarray,
+def _compute_client_class_counts(
     labels: np.ndarray,
     user_indices: List[List[int]],
-    rng: np.random.RandomState,
-) -> Tuple[List[list], List[list]]:
-    user_x = [[] for _ in range(len(user_indices))]
-    user_y = [[] for _ in range(len(user_indices))]
-
+    class_values: np.ndarray,
+) -> np.ndarray:
+    class_to_col = {int(c): i for i, c in enumerate(class_values.tolist())}
+    counts = np.zeros((len(user_indices), len(class_values)), dtype=np.int64)
     for uid, indices in enumerate(user_indices):
-        if len(indices) == 0:
+        if not indices:
             continue
-        idx = np.array(indices, dtype=np.int64)
-        rng.shuffle(idx)
-        user_x[uid] = data[idx].tolist()
-        user_y[uid] = labels[idx].tolist()
-    return user_x, user_y
+        y = labels[np.array(indices, dtype=np.int64)]
+        vals, cnts = np.unique(y, return_counts=True)
+        for v, c in zip(vals.tolist(), cnts.tolist()):
+            if int(v) in class_to_col:
+                counts[uid, class_to_col[int(v)]] = int(c)
+    return counts
 
 
-def build_label_distribution(train_y: List[list], num_classes: int) -> np.ndarray:
-    dist = np.zeros((len(train_y), num_classes), dtype=np.int64)
-    for uid, labels in enumerate(train_y):
+def _allocate_test_counts_from_train(
+    num_test_samples: int,
+    train_weights: np.ndarray,
+) -> np.ndarray:
+    active = np.where(train_weights > 0)[0]
+    alloc = np.zeros_like(train_weights, dtype=np.int64)
+
+    if num_test_samples == 0 or len(active) == 0:
+        return alloc
+
+    active_weights = train_weights[active].astype(np.float64)
+    active_weights = active_weights / np.sum(active_weights)
+
+    if num_test_samples >= len(active):
+        # Prefer at least one test sample for each active client when class test pool is enough.
+        base = np.ones(len(active), dtype=np.int64)
+        remain = num_test_samples - len(active)
+        extra = integer_counts(remain, active_weights)
+        alloc_active = base + extra
+    else:
+        alloc_active = integer_counts(num_test_samples, active_weights)
+
+    alloc[active] = alloc_active
+    return alloc
+
+
+def _matched_task_test_indices(
+    test_labels: np.ndarray,
+    task_test_indices: np.ndarray,
+    class_values: np.ndarray,
+    train_counts: np.ndarray,
+    rng: np.random.RandomState,
+) -> Tuple[List[List[int]], np.ndarray, np.ndarray]:
+    num_users = train_counts.shape[0]
+    test_user_indices = [[] for _ in range(num_users)]
+    test_counts = np.zeros_like(train_counts, dtype=np.int64)
+    class_totals = np.zeros(len(class_values), dtype=np.int64)
+
+    for col, cls in enumerate(class_values.tolist()):
+        cls_indices = task_test_indices[test_labels[task_test_indices] == int(cls)]
+        shuffled = cls_indices.copy()
+        rng.shuffle(shuffled)
+        class_totals[col] = int(len(shuffled))
+
+        alloc = _allocate_test_counts_from_train(len(shuffled), train_counts[:, col])
+        if int(np.sum(alloc)) != int(len(shuffled)):
+            raise RuntimeError(f"test allocation conservation failed for class={cls}")
+
+        start = 0
+        for uid, cnt in enumerate(alloc.tolist()):
+            if cnt <= 0:
+                continue
+            end = start + int(cnt)
+            chunk = shuffled[start:end]
+            test_user_indices[uid].extend(chunk.tolist())
+            test_counts[uid, col] = int(cnt)
+            start = end
+
+        if start != len(shuffled):
+            raise RuntimeError(f"test allocation cursor mismatch for class={cls}, start={start}, total={len(shuffled)}")
+
+    return test_user_indices, test_counts, class_totals
+
+
+def _validate_task_constraints(
+    train_counts: np.ndarray,
+    test_counts: np.ndarray,
+    min_train_per_client_per_task: int,
+    min_test_per_client_per_task: int,
+    min_classes_per_client_per_task: int,
+    class_totals: np.ndarray,
+    task_idx: int,
+):
+    tr_samples = np.sum(train_counts, axis=1)
+    te_samples = np.sum(test_counts, axis=1)
+    tr_classes = np.sum(train_counts > 0, axis=1)
+
+    if int(np.min(tr_samples)) < min_train_per_client_per_task:
+        raise ValueError(
+            f"task-{task_idx}: min train samples/client={int(np.min(tr_samples))} < {min_train_per_client_per_task}"
+        )
+    if int(np.min(te_samples)) < min_test_per_client_per_task:
+        raise ValueError(
+            f"task-{task_idx}: min test samples/client={int(np.min(te_samples))} < {min_test_per_client_per_task}"
+        )
+    if int(np.min(tr_classes)) < min_classes_per_client_per_task:
+        raise ValueError(
+            f"task-{task_idx}: min train classes/client={int(np.min(tr_classes))} < {min_classes_per_client_per_task}"
+        )
+
+    support_violation = np.any((test_counts > 0) & (train_counts <= 0))
+    if support_violation:
+        raise ValueError(f"task-{task_idx}: found test label assigned to client without train support")
+
+    per_class_sum = np.sum(test_counts, axis=0)
+    if not np.array_equal(per_class_sum.astype(np.int64), class_totals.astype(np.int64)):
+        raise ValueError(f"task-{task_idx}: class-level test conservation check failed")
+
+
+def _validate_global_support(train_y: List[list], test_y: List[list]):
+    for uid in range(len(train_y)):
+        tr = set(int(v) for v in train_y[uid])
+        te = set(int(v) for v in test_y[uid])
+        if not te.issubset(tr):
+            missing = sorted(list(te - tr))
+            raise RuntimeError(f"client {uid}: test labels not in train labels: {missing}")
+
+
+def build_label_distribution(labels_per_user: List[list], class_values: np.ndarray) -> np.ndarray:
+    class_to_col = {int(c): i for i, c in enumerate(class_values.tolist())}
+    dist = np.zeros((len(labels_per_user), len(class_values)), dtype=np.int64)
+
+    for uid, labels in enumerate(labels_per_user):
         if len(labels) == 0:
             continue
         vals, cnts = np.unique(np.array(labels, dtype=np.int64), return_counts=True)
-        dist[uid, vals] = cnts
+        for v, c in zip(vals.tolist(), cnts.tolist()):
+            if int(v) in class_to_col:
+                dist[uid, class_to_col[int(v)]] = int(c)
+
     return dist
 
 
@@ -281,20 +371,21 @@ def validate_no_overlap_and_conservation(
     total_size: int,
     name: str,
 ):
-    flat = np.concatenate([np.array(v, dtype=np.int64) for v in user_indices if len(v) > 0], axis=0)
+    flat_parts = [np.array(v, dtype=np.int64) for v in user_indices if len(v) > 0]
+    flat = np.concatenate(flat_parts, axis=0) if flat_parts else np.array([], dtype=np.int64)
     if len(flat) != total_size:
         raise RuntimeError(f"{name}: sample conservation failed, got {len(flat)} != {total_size}")
     if len(np.unique(flat)) != total_size:
         raise RuntimeError(f"{name}: overlap detected across clients (duplicate indices found).")
 
 
-def print_distribution_stats(label_distribution: np.ndarray, train_num_samples: List[int]):
-    print("\n>>> Distribution Statistics:")
+def print_distribution_stats(label_distribution: np.ndarray, num_samples: List[int], split_name: str):
+    print(f"\n>>> {split_name} Distribution Statistics:")
     print(f"Total clients: {label_distribution.shape[0]}")
     print(f"Total classes: {label_distribution.shape[1]}")
 
     classes_per_client = (label_distribution > 0).sum(axis=1)
-    samples_per_client = np.array(train_num_samples, dtype=np.int64)
+    samples_per_client = np.array(num_samples, dtype=np.int64)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         probs = label_distribution / np.maximum(label_distribution.sum(axis=1, keepdims=True), 1)
@@ -325,8 +416,22 @@ def print_distribution_stats(label_distribution: np.ndarray, train_num_samples: 
     )
 
 
-def plot_label_heatmap(label_distribution: np.ndarray, save_path: str, num_classes: int, alpha: float):
+def plot_label_heatmap(
+    label_distribution: np.ndarray,
+    save_path: str,
+    class_values: np.ndarray,
+    title_prefix: str,
+):
     """Generate and save label distribution heatmaps (proportions and raw counts)."""
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            "Heatmap plotting requires matplotlib and seaborn. "
+            "Install them or run with --no-save."
+        ) from e
+
     plt.figure(figsize=(20, 12))
 
     label_proportions = label_distribution / (label_distribution.sum(axis=1, keepdims=True) + 1e-10)
@@ -334,7 +439,7 @@ def plot_label_heatmap(label_distribution: np.ndarray, save_path: str, num_class
         label_proportions,
         cmap="YlOrRd",
         cbar_kws={"label": "Proportion of samples"},
-        xticklabels=range(num_classes),
+        xticklabels=[int(v) for v in class_values.tolist()],
         yticklabels=False,
     )
 
@@ -349,11 +454,7 @@ def plot_label_heatmap(label_distribution: np.ndarray, save_path: str, num_class
         ax.set_yticks(positions + 0.5)
         ax.set_yticklabels([str(int(p)) for p in positions], fontsize=7)
 
-    plt.title(
-        f"Label Distribution Heatmap (Dirichlet Non-IID, alpha={alpha:.4g})",
-        fontsize=16,
-        fontweight="bold",
-    )
+    plt.title(f"{title_prefix} Label Distribution Heatmap", fontsize=16, fontweight="bold")
     plt.xlabel("Class ID", fontsize=14)
     plt.ylabel("Client ID", fontsize=14)
     plt.tight_layout()
@@ -366,7 +467,7 @@ def plot_label_heatmap(label_distribution: np.ndarray, save_path: str, num_class
         label_distribution,
         cmap="Blues",
         cbar_kws={"label": "Number of samples"},
-        xticklabels=range(num_classes),
+        xticklabels=[int(v) for v in class_values.tolist()],
         yticklabels=False,
         fmt="g",
     )
@@ -380,11 +481,7 @@ def plot_label_heatmap(label_distribution: np.ndarray, save_path: str, num_class
         ax2.set_yticks(positions + 0.5)
         ax2.set_yticklabels([str(int(p)) for p in positions], fontsize=7)
 
-    plt.title(
-        f"Label Distribution Heatmap - Sample Counts (Dirichlet, alpha={alpha:.4g})",
-        fontsize=16,
-        fontweight="bold",
-    )
+    plt.title(f"{title_prefix} Label Distribution Heatmap - Sample Counts", fontsize=16, fontweight="bold")
     plt.xlabel("Class ID", fontsize=14)
     plt.ylabel("Client ID", fontsize=14)
     plt.tight_layout()
@@ -396,51 +493,124 @@ def plot_label_heatmap(label_distribution: np.ndarray, save_path: str, num_class
     plt.close("all")
 
 
-def create_dirichlet_partition(
+def create_taskwise_dirichlet_partition(
     train_data: np.ndarray,
     train_labels: np.ndarray,
     test_data: np.ndarray,
     test_labels: np.ndarray,
     num_users: int,
-    num_classes: int,
+    num_tasks: int,
     alpha: float,
+    min_train_per_client_per_task: int,
+    min_test_per_client_per_task: int,
+    min_classes_per_client_per_task: int,
+    max_resample_rounds: int,
     rng: np.random.RandomState,
-    max_resample_rounds: int = 20,
 ):
-    train_user_indices = None
-    for _ in range(max_resample_rounds):
-        sampled = sample_dirichlet_partition_indices(
-            train_labels, num_users=num_users, num_classes=num_classes, alpha=alpha, rng=rng
-        )
-        if min(len(v) for v in sampled) > 0:
-            train_user_indices = sampled
+    unique_labels = np.unique(train_labels)
+    task_splits = [np.array(x, dtype=np.int64) for x in np.array_split(unique_labels, num_tasks)]
+
+    last_error = "unknown"
+    for round_i in range(1, max_resample_rounds + 1):
+        agg_train_indices = [[] for _ in range(num_users)]
+        agg_test_indices = [[] for _ in range(num_users)]
+        round_ok = True
+
+        try:
+            for task_idx, task_labels in enumerate(task_splits, start=1):
+                task_train_indices = np.where(np.isin(train_labels, task_labels))[0]
+                task_test_indices = np.where(np.isin(test_labels, task_labels))[0]
+
+                if len(task_train_indices) == 0 or len(task_test_indices) == 0:
+                    raise ValueError(
+                        f"task-{task_idx}: empty task split (train={len(task_train_indices)}, test={len(task_test_indices)})"
+                    )
+
+                train_user_indices = _sample_task_dirichlet_train_indices(
+                    labels=train_labels,
+                    candidate_indices=task_train_indices,
+                    class_values=task_labels,
+                    num_users=num_users,
+                    alpha=alpha,
+                    rng=rng,
+                )
+
+                train_counts = _compute_client_class_counts(
+                    labels=train_labels,
+                    user_indices=train_user_indices,
+                    class_values=task_labels,
+                )
+
+                test_user_indices, test_counts, class_totals = _matched_task_test_indices(
+                    test_labels=test_labels,
+                    task_test_indices=task_test_indices,
+                    class_values=task_labels,
+                    train_counts=train_counts,
+                    rng=rng,
+                )
+
+                _validate_task_constraints(
+                    train_counts=train_counts,
+                    test_counts=test_counts,
+                    min_train_per_client_per_task=min_train_per_client_per_task,
+                    min_test_per_client_per_task=min_test_per_client_per_task,
+                    min_classes_per_client_per_task=min_classes_per_client_per_task,
+                    class_totals=class_totals,
+                    task_idx=task_idx,
+                )
+
+                for uid in range(num_users):
+                    agg_train_indices[uid].extend(train_user_indices[uid])
+                    agg_test_indices[uid].extend(test_user_indices[uid])
+
+        except Exception as e:
+            round_ok = False
+            last_error = f"round={round_i}: {type(e).__name__}: {e}"
+
+        if round_ok:
+            validate_no_overlap_and_conservation(agg_train_indices, len(train_labels), "train")
+            validate_no_overlap_and_conservation(agg_test_indices, len(test_labels), "test")
+            print(f">>> Resample succeeded at round {round_i}/{max_resample_rounds}")
             break
-    if train_user_indices is None:
-        sampled = sample_dirichlet_partition_indices(
-            train_labels, num_users=num_users, num_classes=num_classes, alpha=alpha, rng=rng
+    else:
+        raise RuntimeError(
+            "Failed to generate a valid task-wise Dirichlet partition after "
+            f"{max_resample_rounds} rounds. Last error: {last_error}"
         )
-        train_user_indices = repair_empty_clients(sampled, rng)
 
-    test_user_indices = sample_dirichlet_partition_indices(
-        test_labels, num_users=num_users, num_classes=num_classes, alpha=alpha, rng=rng
-    )
+    train_x = [[] for _ in range(num_users)]
+    train_y = [[] for _ in range(num_users)]
+    test_x = [[] for _ in range(num_users)]
+    test_y = [[] for _ in range(num_users)]
 
-    validate_no_overlap_and_conservation(train_user_indices, len(train_labels), "train")
-    validate_no_overlap_and_conservation(test_user_indices, len(test_labels), "test")
+    for uid in range(num_users):
+        tr_idx = np.array(agg_train_indices[uid], dtype=np.int64)
+        te_idx = np.array(agg_test_indices[uid], dtype=np.int64)
 
-    train_X, train_y = build_non_overlapping_user_data(train_data, train_labels, train_user_indices, rng)
-    test_X, test_y = build_non_overlapping_user_data(test_data, test_labels, test_user_indices, rng)
-    label_distribution = build_label_distribution(train_y, num_classes)
+        rng.shuffle(tr_idx)
+        rng.shuffle(te_idx)
 
-    return train_X, train_y, test_X, test_y, label_distribution
+        train_x[uid] = train_data[tr_idx].tolist()
+        train_y[uid] = train_labels[tr_idx].tolist()
+        test_x[uid] = test_data[te_idx].tolist()
+        test_y[uid] = test_labels[te_idx].tolist()
+
+    _validate_global_support(train_y, test_y)
+
+    return train_x, train_y, test_x, test_y, unique_labels
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate EMNIST-balanced Dirichlet non-IID partition.")
+    parser = argparse.ArgumentParser(description="Generate EMNIST-balanced task-wise Dirichlet non-IID partition.")
     parser.add_argument("--num_user", type=int, default=100, help="Number of clients")
-    parser.add_argument("--num_classes", type=int, default=47, help="Number of classes")
-    parser.add_argument("--alpha", type=float, default=0.3, help="Dirichlet concentration alpha")
+    parser.add_argument("--num_classes", type=int, default=47, help="Expected number of classes")
+    parser.add_argument("--num_tasks", type=int, default=3, help="Number of continual tasks")
+    parser.add_argument("--alpha", type=float, default=0.3, help="Dirichlet concentration alpha per task")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--min_train_per_client_per_task", type=int, default=20)
+    parser.add_argument("--min_test_per_client_per_task", type=int, default=5)
+    parser.add_argument("--min_classes_per_client_per_task", type=int, default=2)
+    parser.add_argument("--max_resample_rounds", type=int, default=20)
     parser.add_argument("--save", action="store_true", default=True, help="Whether to save output pkl files")
     parser.add_argument("--no-save", action="store_false", dest="save", help="Disable saving files")
     parser.add_argument("--image_data", action="store_true", default=False, help="Keep image tensor layout")
@@ -452,14 +622,16 @@ def main():
         raise ValueError("--num_user must be > 0.")
     if args.num_classes <= 0:
         raise ValueError("--num_classes must be > 0.")
+    if args.num_tasks <= 0:
+        raise ValueError("--num_tasks must be > 0.")
 
     rng = np.random.RandomState(args.seed)
 
     print("=" * 80)
-    print("EMNIST-balanced Dirichlet Non-IID Data Generator")
+    print("EMNIST-balanced Task-wise Dirichlet Non-IID Data Generator")
     print("=" * 80)
     print(
-        f">>> Config: num_user={args.num_user}, num_classes={args.num_classes}, "
+        f">>> Config: num_user={args.num_user}, num_classes={args.num_classes}, num_tasks={args.num_tasks}, "
         f"alpha={args.alpha}, seed={args.seed}, save={args.save}"
     )
 
@@ -470,16 +642,26 @@ def main():
 
     print(f"Train samples: {len(train_dataset)}, Test samples: {len(test_dataset)}")
 
-    train_X, train_y, test_X, test_y, label_distribution = create_dirichlet_partition(
+    train_X, train_y, test_X, test_y, class_values = create_taskwise_dirichlet_partition(
         train_dataset.data,
         train_dataset.target,
         test_dataset.data,
         test_dataset.target,
         num_users=args.num_user,
-        num_classes=args.num_classes,
+        num_tasks=args.num_tasks,
         alpha=args.alpha,
+        min_train_per_client_per_task=args.min_train_per_client_per_task,
+        min_test_per_client_per_task=args.min_test_per_client_per_task,
+        min_classes_per_client_per_task=args.min_classes_per_client_per_task,
+        max_resample_rounds=args.max_resample_rounds,
         rng=rng,
     )
+
+    if len(class_values) != args.num_classes:
+        print(
+            f"Warning: detected {len(class_values)} classes in data, "
+            f"but --num_classes={args.num_classes}."
+        )
 
     train_data = {"users": [], "user_data": {}, "num_samples": []}
     test_data = {"users": [], "user_data": {}, "num_samples": []}
@@ -492,16 +674,23 @@ def main():
         test_data["user_data"][uname] = {"x": test_X[i], "y": test_y[i]}
         test_data["num_samples"].append(len(test_X[i]))
 
-    print_distribution_stats(label_distribution, train_data["num_samples"])
+    train_label_distribution = build_label_distribution(train_y, class_values)
+    test_label_distribution = build_label_distribution(test_y, class_values)
+
+    print_distribution_stats(train_label_distribution, train_data["num_samples"], split_name="Train")
+    print_distribution_stats(test_label_distribution, test_data["num_samples"], split_name="Test")
     print(f"\n>>> Total training size: {sum(train_data['num_samples'])}")
     print(f">>> Total testing size: {sum(test_data['num_samples'])}")
 
     image_flag = 1 if args.image_data else 0
     a_tag = alpha_tag(args.alpha)
-    train_path = f"{cpath}/data/train/emnist_balanced_{image_flag}_dirichlet_a{a_tag}_niid.pkl"
-    test_path = f"{cpath}/data/test/emnist_balanced_{image_flag}_dirichlet_a{a_tag}_niid.pkl"
-    dist_path = f"{cpath}/emnist_balanced_dirichlet_a{a_tag}_label_distribution.npy"
-    heatmap_path = f"{cpath}/emnist_balanced_dirichlet_a{a_tag}_label_heatmap.png"
+    dataset_tag = f"emnist_balanced_{image_flag}_dirichlet_t{args.num_tasks}_a{a_tag}_niid"
+    train_path = f"{cpath}/data/train/{dataset_tag}.pkl"
+    test_path = f"{cpath}/data/test/{dataset_tag}.pkl"
+    train_dist_path = f"{cpath}/{dataset_tag}_train_label_distribution.npy"
+    test_dist_path = f"{cpath}/{dataset_tag}_test_label_distribution.npy"
+    train_heatmap_path = f"{cpath}/{dataset_tag}_train_label_heatmap.png"
+    test_heatmap_path = f"{cpath}/{dataset_tag}_test_label_heatmap.png"
 
     for path in [train_path, test_path]:
         dir_path = os.path.dirname(path)
@@ -509,19 +698,33 @@ def main():
             os.makedirs(dir_path, exist_ok=True)
 
     if args.save:
-        print("\n>>> Generating label distribution heatmap...")
-        plot_label_heatmap(label_distribution, heatmap_path, args.num_classes, args.alpha)
+        print("\n>>> Generating train/test label distribution heatmaps...")
+        plot_label_heatmap(
+            train_label_distribution,
+            train_heatmap_path,
+            class_values,
+            title_prefix=f"Train (Task-wise Dirichlet, alpha={args.alpha:.4g}, tasks={args.num_tasks})",
+        )
+        plot_label_heatmap(
+            test_label_distribution,
+            test_heatmap_path,
+            class_values,
+            title_prefix=f"Test (Matched to train, alpha={args.alpha:.4g}, tasks={args.num_tasks})",
+        )
 
         print("\n>>> Saving data files...")
         with open(train_path, "wb") as f:
             pickle.dump(train_data, f)
         with open(test_path, "wb") as f:
             pickle.dump(test_data, f)
-        np.save(dist_path, label_distribution)
+        np.save(train_dist_path, train_label_distribution)
+        np.save(test_dist_path, test_label_distribution)
         print(f"Train data saved to: {train_path}")
         print(f"Test data saved to: {test_path}")
-        print(f"Label distribution saved to: {dist_path}")
-        print(f"Heatmap saved to: {heatmap_path}")
+        print(f"Train label distribution saved to: {train_dist_path}")
+        print(f"Test label distribution saved to: {test_dist_path}")
+        print(f"Train heatmap saved to: {train_heatmap_path}")
+        print(f"Test heatmap saved to: {test_heatmap_path}")
 
     print("\n" + "=" * 80)
     print("Data generation completed successfully!")

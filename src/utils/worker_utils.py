@@ -291,6 +291,17 @@ class Metrics(object):
         self.eval_writer.add_scalar('collab/mean_test_loss', mean_loss, round_i)
         self.eval_writer.add_scalar('collab/mean_test_acc', mean_acc, round_i)
         self.eval_writer.add_scalar('collab/std_test_acc', std_acc, round_i)
+        # Add collaborative series into the same comparison charts so TensorBoard
+        # shows global/personalized/collab curves together.
+        try:
+            self.eval_writer.add_scalars('comparison/test_acc',
+                                         {'collab': float(mean_acc)},
+                                         round_i)
+            self.eval_writer.add_scalars('comparison/test_loss',
+                                         {'collab': float(mean_loss)},
+                                         round_i)
+        except Exception:
+            pass
 
     def write(self):
         metrics = dict()

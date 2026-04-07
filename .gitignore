@@ -8,7 +8,7 @@
 *.png
 *.npy
 /zjy
-*.sh
+test.sh
 /AGENTS.md
 *.json
 

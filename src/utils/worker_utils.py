@@ -156,19 +156,28 @@ class Metrics(object):
         self.collab_mean_acc = [0] * num_rounds
         self.collab_std_acc = [0] * num_rounds
 
-        self.result_path = mkdir(os.path.join('./result', self.options['dataset']))
-        suffix = '{}_sd{}_lr{}_ep{}_bs{}_{}'.format(name,
-                                                    options['seed'],
-                                                    options['lr'],
-                                                    options['num_epoch'],
-                                                    options['batch_size'],
-                                                    'w' if options['simple_average'] else 'a')
+        result_path_override = self.options.get('result_path_override', None)
+        if result_path_override is not None and str(result_path_override).strip() != '':
+            self.result_path = mkdir(str(result_path_override))
+        else:
+            self.result_path = mkdir(os.path.join('./result', self.options['dataset']))
 
-        self.exp_name = '{}_{}_{}_{}'.format(time.strftime('%Y-%m-%dT%H-%M-%S'), options['algo'],
-                                             options['model'], suffix)
-        if options['dis']:
-            suffix = options['dis']
-            self.exp_name += '_{}'.format(suffix)
+        exp_name_override = self.options.get('exp_name_override', None)
+        if exp_name_override is not None and str(exp_name_override).strip() != '':
+            self.exp_name = str(exp_name_override)
+        else:
+            suffix = '{}_sd{}_lr{}_ep{}_bs{}_{}'.format(name,
+                                                        options['seed'],
+                                                        options['lr'],
+                                                        options['num_epoch'],
+                                                        options['batch_size'],
+                                                        'w' if options['simple_average'] else 'a')
+
+            self.exp_name = '{}_{}_{}_{}'.format(time.strftime('%Y-%m-%dT%H-%M-%S'), options['algo'],
+                                                 options['model'], suffix)
+            if options.get('dis', ''):
+                suffix = options['dis']
+                self.exp_name += '_{}'.format(suffix)
         train_event_folder = mkdir(os.path.join(self.result_path, self.exp_name, 'train.event'))
         eval_event_folder = mkdir(os.path.join(self.result_path, self.exp_name, 'eval.event'))
         self.train_writer = SummaryWriter(train_event_folder)

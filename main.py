@@ -25,6 +25,10 @@ def read_options():
                         help='name of model;',
                         type=str,
                         default='logistic')
+    parser.add_argument('--run_name',
+                        help='custom output folder name under ./result; if empty, auto-generate by params',
+                        type=str,
+                        default='')
     parser.add_argument('--wd',
                         help='weight decay parameter;',
                         type=float,
@@ -152,6 +156,29 @@ def read_options():
                         help='enable task-aware logit slicing/remap (TIL setting); default False for class-incremental eval')
     parsed = parser.parse_args()
     options = parsed.__dict__
+    raw_run_name = str(options.get('run_name', '')).strip()
+    if raw_run_name == '':
+        options['run_name'] = '{}_{}_{}_{}_sd{}_lr{}_ep{}_bs{}'.format(
+            time.strftime('%Y-%m-%dT%H-%M-%S'),
+            options['algo'],
+            options['dataset'],
+            options['model'],
+            options['seed'],
+            options['lr'],
+            options['num_epoch'],
+            options['batch_size']
+        )
+    else:
+        safe_run_name = raw_run_name.replace('/', '_').replace('\\', '_').replace(' ', '_')
+        if safe_run_name != raw_run_name:
+            print(f"Warning[read_options]: normalized --run_name from `{raw_run_name}` to `{safe_run_name}`")
+        options['run_name'] = safe_run_name
+
+    # For a single command run, default output is one folder under ./result/<run_name>.
+    # Sequential CL further stores each task under ./result/<run_name>/task{idx}.
+    options['result_path_override'] = './result'
+    options['exp_name_override'] = options['run_name']
+
     options['gpu'] = options['gpu'] and torch.cuda.is_available()
     if options.get('personal_num_epoch', None) is None:
         options['personal_num_epoch'] = int(options['num_epoch'])
@@ -942,6 +969,9 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
     for i, ls in enumerate(task_label_lists, start=1):
         print(f'    Task-{i} labels: {ls}')
 
+    run_output_dir = os.path.join('./result', options['run_name'])
+    os.makedirs(run_output_dir, exist_ok=True)
+
     prev_global_model = None
     prev_client_state = None
     task_summaries = []
@@ -956,6 +986,8 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
         task_options = dict(options)
         task_options['dataset'] = f"{options['dataset']}_task{task_idx}"
         task_options['dis'] = (task_options.get('dis', '') + f"_cl_task{task_idx}").strip('_')
+        task_options['result_path_override'] = run_output_dir
+        task_options['exp_name_override'] = f'task{task_idx}'
         task_options['active_labels'] = [int(v) for v in task_label_lists[task_idx - 1]]
         task_options['label_map'] = {
             int(g): int(i) for i, g in enumerate(task_label_lists[task_idx - 1])
@@ -1103,7 +1135,7 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
     forgetting_personalized, mean_forgetting_personalized = _compute_forgetting(eval_acc_matrix_personalized)
     forgetting_collab_beta, mean_forgetting_collab_beta = _compute_forgetting(eval_acc_matrix_collab_beta)
 
-    summary_path = os.path.join('result', f"{options['dataset']}_cl{len(task_datasets)}_sequential_summary_{time.strftime('%Y-%m-%dT%H-%M-%S')}.json")
+    summary_path = os.path.join(run_output_dir, f"{options['dataset']}_cl{len(task_datasets)}_sequential_summary_{time.strftime('%Y-%m-%dT%H-%M-%S')}.json")
     os.makedirs(os.path.dirname(summary_path), exist_ok=True)
     with open(summary_path, 'w') as sf:
         import json
@@ -1135,14 +1167,14 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
 
     ts = time.strftime('%Y-%m-%dT%H-%M-%S')
     # Save matrix as npy for easier downstream analysis
-    np.save(os.path.join('result', f"{options['dataset']}_cl_acc_matrix_{ts}.npy"),
-            eval_acc_matrix_global)
-    np.save(os.path.join('result', f"{options['dataset']}_cl_acc_matrix_global_{ts}.npy"),
-            eval_acc_matrix_global)
-    np.save(os.path.join('result', f"{options['dataset']}_cl_acc_matrix_personalized_{ts}.npy"),
-            eval_acc_matrix_personalized)
-    np.save(os.path.join('result', f"{options['dataset']}_cl_acc_matrix_collab_beta_{ts}.npy"),
-            eval_acc_matrix_collab_beta)
+    np.save(os.path.join(run_output_dir, f"{options['dataset']}_cl_acc_matrix_{ts}.npy"),
+        eval_acc_matrix_global)
+    np.save(os.path.join(run_output_dir, f"{options['dataset']}_cl_acc_matrix_global_{ts}.npy"),
+        eval_acc_matrix_global)
+    np.save(os.path.join(run_output_dir, f"{options['dataset']}_cl_acc_matrix_personalized_{ts}.npy"),
+        eval_acc_matrix_personalized)
+    np.save(os.path.join(run_output_dir, f"{options['dataset']}_cl_acc_matrix_collab_beta_{ts}.npy"),
+        eval_acc_matrix_collab_beta)
 
     def _save_cl_heatmap(acc_matrix, tag):
         try:
@@ -1163,7 +1195,7 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
             plt.xticks(ticks, labels)
             plt.yticks(ticks, labels)
             plt.tight_layout()
-            heat_path = os.path.join('result', f"{options['dataset']}_cl_acc_matrix_{tag}_{ts}.png")
+            heat_path = os.path.join(run_output_dir, f"{options['dataset']}_cl_acc_matrix_{tag}_{ts}.png")
             plt.savefig(heat_path, dpi=200)
             plt.close()
             print(f'>>> Saved CL accuracy matrix heatmap ({tag}) to {heat_path}')

@@ -12,7 +12,7 @@ SEED=0
 
 BASE="tune_mu_${MODEL}_r${ROUNDS}_c${CLIENTS}_lr${LR}_sd${SEED}"
 
-for MU in 0 0.0001 0.001
+for MU in 0 0.0001 0.001 0.01 0.1 1
  do
   echo "===== Tune mu: $MU ====="
   python main.py \
@@ -28,8 +28,8 @@ for MU in 0 0.0001 0.001
     --lr $LR \
     --mu $MU \
     --lambda_old 0 \
-    --lambda_s 0.01 \
-    --lambda_l 0.01 \
+    --lambda_s 0.0 \
+    --lambda_l 0.0 \
     --alpha 0.9 \
     --beta_mode fixed \
     --beta_fixed 0.5 \

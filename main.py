@@ -1043,6 +1043,12 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
         }
         task_options['num_active_classes'] = len(task_label_lists[task_idx - 1])
 
+        # Task-1 has no historical task anchor; disable all CL regularization terms.
+        if task_idx == 1:
+            task_options['lambda_old'] = 0.0
+            task_options['lambda_s'] = 0.0
+            task_options['lambda_l'] = 0.0
+
         # Task-1 has no previous-task anchor; Task-2/3/... use previous global model snapshot
         if prev_global_model is not None:
             task_options['prev_model'] = prev_global_model.detach().clone()
@@ -1051,7 +1057,12 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
 
         print('\n' + '=' * 90)
         print(f'>>> Start sequential Task-{task_idx}/{len(task_datasets)}')
-        print(f">>> Using previous-task regularization: lambda_old={task_options.get('lambda_old', 0.0)}")
+        print(
+            f">>> Active regularization: "
+            f"lambda_old={task_options.get('lambda_old', 0.0)}, "
+            f"lambda_s={task_options.get('lambda_s', 0.0)}, "
+            f"lambda_l={task_options.get('lambda_l', 0.0)}"
+        )
         print(f">>> Prev model loaded: {task_options.get('prev_model', None) is not None}")
         print('=' * 90)
 

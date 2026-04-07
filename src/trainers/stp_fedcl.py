@@ -110,15 +110,41 @@ class STPFedCLTrainer(BaseTrainer):
 
         return _hook
 
-    def _update_client_memories(self, cid, local_solution):
-        local_solution = local_solution.detach().clone()
-        self.client_prev[cid] = local_solution.clone()
+    def _finalize_task_anchors(self):
+        """Update temporal anchors once at task boundary (after all rounds)."""
+        before_prev_diffs = []
+        before_ema_diffs = []
 
-        old_ema = self.client_ema.get(cid, local_solution.clone())
-        if old_ema.device != local_solution.device:
-            old_ema = old_ema.to(local_solution.device)
-        new_ema = self.alpha * old_ema + (1.0 - self.alpha) * local_solution
-        self.client_ema[cid] = new_ema.detach().clone()
+        for c in self.clients:
+            cid = c.cid
+            personal = self.personal_models.get(cid, self.latest_model).detach().clone()
+            prev_old = self.client_prev.get(cid, personal).detach().clone()
+            ema_old = self.client_ema.get(cid, personal).detach().clone()
+
+            if prev_old.device != personal.device:
+                prev_old = prev_old.to(personal.device)
+            if ema_old.device != personal.device:
+                ema_old = ema_old.to(personal.device)
+
+            before_prev_diffs.append(float(torch.norm(personal - prev_old, p=2).item()))
+            before_ema_diffs.append(float(torch.norm(personal - ema_old, p=2).item()))
+
+            # task-level short anchor: previous-task personalized model
+            self.client_prev[cid] = personal.clone()
+            # task-level long anchor: EMA updated only at task boundary
+            new_ema = self.alpha * ema_old + (1.0 - self.alpha) * personal
+            self.client_ema[cid] = new_ema.detach().clone()
+
+        if self.log_reg_terms and len(before_prev_diffs) > 0:
+            mean_prev_before = sum(before_prev_diffs) / len(before_prev_diffs)
+            mean_ema_before = sum(before_ema_diffs) / len(before_ema_diffs)
+            print(
+                "[TaskAnchorFinalize] "
+                f"clients={len(before_prev_diffs)} "
+                f"mean||personal-prev_before||={mean_prev_before:.6f} "
+                f"mean||personal-ema_before||={mean_ema_before:.6f} "
+                
+            )
 
     def _make_client_val_loader(self, client):
         # IMPORTANT: beta search must not use test data.
@@ -325,7 +351,6 @@ class STPFedCLTrainer(BaseTrainer):
                         local_stats['norm'], local_stats['min'], local_stats['max'],
                         local_stats['loss'], local_stats['acc'] * 100, local_stats['time']))
                 self.personal_models[c.cid] = local_solution.detach().clone()
-                self._update_client_memories(c.cid, local_solution)
 
             # Track personalized metrics each round
             self._evaluate_personalized_all_clients(round_i)
@@ -339,5 +364,7 @@ class STPFedCLTrainer(BaseTrainer):
 
         # Adaptive beta selection once at training end (or fixed assignment)
         self._update_all_client_betas()
+        # Task-level anchor update: apply once when this task finishes.
+        self._finalize_task_anchors()
 
         self.metrics.write()

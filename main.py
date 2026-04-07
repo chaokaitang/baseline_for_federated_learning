@@ -4,9 +4,67 @@ import importlib
 import torch
 import os
 import time
+import sys
+import traceback
+import contextlib
 
 from src.utils.worker_utils import read_data, MiniDataset
 from config import OPTIMIZERS, DATASETS, MODEL_PARAMS, TRAINERS
+
+
+class TeeStream:
+    """Write stream output to terminal and a log file at the same time."""
+
+    def __init__(self, console_stream, log_stream):
+        self.console_stream = console_stream
+        self.log_stream = log_stream
+
+    def write(self, data):
+        self.console_stream.write(data)
+        self.log_stream.write(data)
+        return len(data)
+
+    def flush(self):
+        self.console_stream.flush()
+        self.log_stream.flush()
+
+    def isatty(self):
+        return self.console_stream.isatty()
+
+
+def _build_default_run_name(options):
+    return '{}_{}_{}_{}_sd{}_lr{}_ep{}_bs{}'.format(
+        time.strftime('%Y-%m-%dT%H-%M-%S'),
+        options['algo'],
+        options['dataset'],
+        options['model'],
+        options['seed'],
+        options['lr'],
+        options['num_epoch'],
+        options['batch_size']
+    )
+
+
+def _sanitize_run_name(run_name):
+    return str(run_name).strip().replace('/', '_').replace('\\', '_').replace(' ', '_')
+
+
+def _preview_run_name_from_argv(argv):
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--algo', type=str, default='fedavg')
+    parser.add_argument('--dataset', type=str, default='mnist_all_data_0_equal_niid')
+    parser.add_argument('--model', type=str, default='logistic')
+    parser.add_argument('--run_name', type=str, default='')
+    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--lr', type=float, default=0.1)
+    parser.add_argument('--num_epoch', type=int, default=5)
+    parser.add_argument('--batch_size', type=int, default=32)
+    known, _ = parser.parse_known_args(argv)
+    opt = vars(known)
+    raw_run_name = str(opt.get('run_name', '')).strip()
+    if raw_run_name == '':
+        return _build_default_run_name(opt)
+    return _sanitize_run_name(raw_run_name)
 
 
 def read_options():
@@ -158,18 +216,9 @@ def read_options():
     options = parsed.__dict__
     raw_run_name = str(options.get('run_name', '')).strip()
     if raw_run_name == '':
-        options['run_name'] = '{}_{}_{}_{}_sd{}_lr{}_ep{}_bs{}'.format(
-            time.strftime('%Y-%m-%dT%H-%M-%S'),
-            options['algo'],
-            options['dataset'],
-            options['model'],
-            options['seed'],
-            options['lr'],
-            options['num_epoch'],
-            options['batch_size']
-        )
+        options['run_name'] = _build_default_run_name(options)
     else:
-        safe_run_name = raw_run_name.replace('/', '_').replace('\\', '_').replace(' ', '_')
+        safe_run_name = _sanitize_run_name(raw_run_name)
         if safe_run_name != raw_run_name:
             print(f"Warning[read_options]: normalized --run_name from `{raw_run_name}` to `{safe_run_name}`")
         options['run_name'] = safe_run_name
@@ -1209,28 +1258,45 @@ def _run_sequential_tasks(options, trainer_class, all_data_info):
 
 
 def main():
-    # Parse command line arguments
-    options, trainer_class, dataset_name, sub_data = read_options()
+    run_root = './result'
+    run_name = _preview_run_name_from_argv(sys.argv[1:])
+    run_output_dir = os.path.join(run_root, run_name)
+    os.makedirs(run_output_dir, exist_ok=True)
+    log_path = os.path.join(run_output_dir, 'run.log')
 
-    train_path = os.path.join('./data', dataset_name, 'data', 'train')
-    test_path = os.path.join('./data', dataset_name, 'data', 'test')
+    with open(log_path, 'a', encoding='utf-8') as log_file:
+        tee_stdout = TeeStream(sys.__stdout__, log_file)
+        tee_stderr = TeeStream(sys.__stderr__, log_file)
 
-    # `dataset` is a tuple like (cids, groups, train_data, test_data)
-    all_data_info = read_data(train_path, test_path, sub_data)
+        with contextlib.redirect_stdout(tee_stdout), contextlib.redirect_stderr(tee_stderr):
+            print(f'>>> Logging stdout/stderr to {log_path}')
+            try:
+                # Parse command line arguments after logger setup so all prints are captured.
+                options, trainer_class, dataset_name, sub_data = read_options()
 
-    if len(all_data_info[0]) == 0:
-        raise ValueError(
-            f'No client data loaded from train_path={train_path}. '
-            f'Please check --dataset="{options["dataset"]}" and data files.'
-        )
+                train_path = os.path.join('./data', dataset_name, 'data', 'train')
+                test_path = os.path.join('./data', dataset_name, 'data', 'test')
 
-    # Call appropriate trainer
-    if options.get('sequential_cl', False):
-        _run_sequential_tasks(options, trainer_class, all_data_info)
-    else:
-        trainer = trainer_class(options, all_data_info)
-        trainer.train()
-        _post_train_eval_and_save(trainer)
+                # `dataset` is a tuple like (cids, groups, train_data, test_data)
+                all_data_info = read_data(train_path, test_path, sub_data)
+
+                if len(all_data_info[0]) == 0:
+                    raise ValueError(
+                        f'No client data loaded from train_path={train_path}. '
+                        f'Please check --dataset="{options["dataset"]}" and data files.'
+                    )
+
+                # Call appropriate trainer
+                if options.get('sequential_cl', False):
+                    _run_sequential_tasks(options, trainer_class, all_data_info)
+                else:
+                    trainer = trainer_class(options, all_data_info)
+                    trainer.train()
+                    _post_train_eval_and_save(trainer)
+            except Exception:
+                print('>>> Fatal error captured, traceback follows:')
+                traceback.print_exc()
+                raise
 
 if __name__ == '__main__':
     main()

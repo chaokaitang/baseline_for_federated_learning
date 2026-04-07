@@ -7,7 +7,6 @@
 /project_file
 *.png
 *.npy
-/zjy
 test.sh
 /AGENTS.md
 *.json

@@ -9,13 +9,19 @@ CLIENTS=50
 EPOCH=1
 LR=0.01
 
+# 按调参结果改这三个值
+STP_MU=0.001
+STP_LS=0.01
+STP_LL=0.01
+
 SEEDS=(0 1 2)
 
 for SEED in "${SEEDS[@]}"
 do
+  BASE="dir_t3_a0p3_${MODEL}_r${ROUNDS}_c${CLIENTS}_lr${LR}_sd${SEED}"
+
   echo "===== Seed $SEED ====="
 
-  # ---------- FedAvg ----------
   python main.py \
     --algo fedavg \
     --dataset $DATASET \
@@ -29,9 +35,9 @@ do
     --lr $LR \
     --seed $SEED \
     --gpu \
-    --task_aware
+    --task_aware \
+    --run_name "fedavg_${BASE}"
 
-  # ---------- FedProx ----------
   python main.py \
     --algo fedprox \
     --dataset $DATASET \
@@ -46,9 +52,9 @@ do
     --lr $LR \
     --seed $SEED \
     --gpu \
-    --task_aware
+    --task_aware \
+    --run_name "fedprox_mu1e3_${BASE}"
 
-  # ---------- Ditto ----------
   python main.py \
     --algo ditto \
     --dataset $DATASET \
@@ -64,9 +70,9 @@ do
     --lr $LR \
     --seed $SEED \
     --gpu \
-    --task_aware
+    --task_aware \
+    --run_name "ditto_lp1_${BASE}"
 
-  # ---------- STP-FedCL ----------
   python main.py \
     --algo stp_fedcl \
     --dataset $DATASET \
@@ -78,17 +84,16 @@ do
     --num_epoch $EPOCH \
     --batch_size 32 \
     --lr $LR \
-    --mu 0.001 \
+    --mu $STP_MU \
     --lambda_old 0 \
-    --lambda_s 0.01 \
-    --lambda_l 0.01 \
+    --lambda_s $STP_LS \
+    --lambda_l $STP_LL \
     --alpha 0.9 \
     --beta_mode fixed \
     --beta_fixed 0.5 \
     --seed $SEED \
     --gpu \
     --task_aware \
-    --log_reg_terms \
-    --reg_log_every 10
+    --run_name "stp_full_${BASE}"
 
 done

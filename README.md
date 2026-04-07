@@ -74,6 +74,8 @@ Output organization:
   - `result/<run_name>/task2/`
   - `result/<run_name>/task3/`
   and summary/matrix files are saved in `result/<run_name>/`.
+- Terminal log: the full stdout/stderr stream is automatically appended to
+  `result/<run_name>/run.log` for each command run.
 
 If `--run_name` is not provided, it is auto-generated from timestamp and key parameters.
 

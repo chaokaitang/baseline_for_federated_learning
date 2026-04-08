@@ -10,14 +10,14 @@ EPOCH=1
 LR=0.01
 SEED=0
 
-MU=0.0001
+MU=0.000
 
 # 把这里改成第一阶段跑出来最好的 lambda_l
-LAMBDA_L=0.0
+LAMBDA_L=0.001
 
 BASE="tune_lambdaS_${MODEL}_r${ROUNDS}_c${CLIENTS}_lr${LR}_sd${SEED}_mu${MU}_ll${LAMBDA_L}"
 
-for LAMBDA_S in 0.0001 0.001 0.01 0.1
+for LAMBDA_S in 0.0001 0.001 0.01 0.1 
 do
   echo "===== Tune lambda_s: $LAMBDA_S (lambda_l fixed at $LAMBDA_L) ====="
   python main.py \

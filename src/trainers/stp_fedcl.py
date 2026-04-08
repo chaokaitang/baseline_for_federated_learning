@@ -9,11 +9,11 @@ class STPFedCLTrainer(BaseTrainer):
     """Spatio-Temporal Personalized Federated Continual Learning trainer.
 
     Global branch:
-        standard FL update to produce aggregated global model.
+                standard FL update with proximal regularization (mu)
+                to the broadcast global anchor, then aggregate.
 
     Personalized branch for each selected client k:
         L = L_task
-          + mu * ||p_k - w_g||^2
           + lambda_s * ||p_k - p_k_prev||^2
           + lambda_l * ||p_k - p_k_ema||^2
         NOTE: all L2 penalties here are unnormalized squared L2 penalties,
@@ -66,16 +66,8 @@ class STPFedCLTrainer(BaseTrainer):
             current = self._flat_params_with_grad(worker.model)
             reg = torch.tensor(0.0, device=current.device, dtype=current.dtype)
 
-            reg_mu = torch.tensor(0.0, device=current.device, dtype=current.dtype)
             reg_s = torch.tensor(0.0, device=current.device, dtype=current.dtype)
             reg_l = torch.tensor(0.0, device=current.device, dtype=current.dtype)
-
-            if self.mu > 0.0:
-                g = global_model
-                if g.device != current.device:
-                    g = g.to(current.device)
-                reg_mu = 0.5 * self.mu * torch.sum((current - g) ** 2)
-                reg = reg + reg_mu
 
             if self.lambda_s > 0.0:
                 p = prev_anchor
@@ -98,7 +90,6 @@ class STPFedCLTrainer(BaseTrainer):
                         print(
                             f"[RegTerms] round={round_i} cid={cid} step={step_counter['n']} "
                             f"base={float(base_loss.item()):.6f} "
-                            f"mu={float(reg_mu.item()):.6f} "
                             f"short={float(reg_s.item()):.6f} "
                             f"long={float(reg_l.item()):.6f} "
                             f"total_reg={float(reg.item()):.6f}"
@@ -321,8 +312,16 @@ class STPFedCLTrainer(BaseTrainer):
 
             selected_clients = self.select_clients(seed=round_i)
 
-            # Branch A: global update and aggregation
-            solns, stats = self.local_train(round_i, selected_clients)
+            # Branch A: global update and aggregation.
+            # Mu is applied here as FedProx-style proximal regularization
+            # toward the broadcast global anchor.
+            global_anchor = self.latest_model.detach().clone()
+            solns, stats = self.local_train(
+                round_i,
+                selected_clients,
+                prox_mu=self.mu,
+                global_params=global_anchor,
+            )
             self.metrics.extend_commu_stats(round_i, stats)
             self.latest_model = self.aggregate(solns)
             print('=' * 102 + "\n")

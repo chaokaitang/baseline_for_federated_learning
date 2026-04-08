@@ -11,14 +11,14 @@ LR=0.01
 SEED=0
 
 # 先固定为前一轮更合适的 mu
-MU=0.0001
+MU=0.000
 
 # 第一阶段：固定 lambda_s，只调 lambda_l
 LAMBDA_S=0.0
 
 BASE="tune_lambdaL_${MODEL}_r${ROUNDS}_c${CLIENTS}_lr${LR}_sd${SEED}_mu${MU}_ls${LAMBDA_S}"
 
-for LAMBDA_L in 5e-5 1e-4 5e-4 1e-3 5e-3
+for LAMBDA_L in 0.1 0.01 0.001 0.0001
 do
   echo "===== Tune lambda_l: $LAMBDA_L (lambda_s fixed at $LAMBDA_S) ====="
   python main.py \

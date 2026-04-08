@@ -137,7 +137,7 @@ def read_options():
                         type=float,
                         default=0.1)
     parser.add_argument('--mu',
-                        help='FedProx proximal term coefficient (mu);',
+                        help='Proximal regularization coefficient (mu); in stp_fedcl it is applied on the global branch.',
                         type=float,
                         default=0.5)
     parser.add_argument('--lambda_p',

@@ -8,16 +8,20 @@ ROUNDS=40
 CLIENTS=50
 EPOCH=1
 LR=0.01
+
 SEED=0
 
-# 按调参结果改这里
-MU=0.001
-LS=0.01
-LL=0.01
+MU=0
+LO=1.0
+LS=0.001
+LL=0.001
 
-BASE="beta_${MODEL}_r${ROUNDS}_c${CLIENTS}_lr${LR}_sd${SEED}"
+BETAS=(0.2 0.5 0.8)
 
-run_beta () {
+for BETA in "${BETAS[@]}"
+do
+  echo "===== Beta $BETA ====="
+
   python main.py \
     --algo stp_fedcl \
     --dataset $DATASET \
@@ -30,23 +34,14 @@ run_beta () {
     --batch_size 32 \
     --lr $LR \
     --mu $MU \
-    --lambda_old 0 \
+    --lambda_old $LO \
     --lambda_s $LS \
     --lambda_l $LL \
     --alpha 0.9 \
     --beta_mode fixed \
-    --beta_fixed "$1" \
+    --beta_fixed $BETA \
     --seed $SEED \
     --gpu \
     --task_aware \
-    --run_name "$2"
-}
-
-echo "===== Beta 0.2 ====="
-run_beta 0.2 "stp_b02_${BASE}"
-
-echo "===== Beta 0.5 ====="
-run_beta 0.5 "stp_b05_${BASE}"
-
-echo "===== Beta 0.8 ====="
-run_beta 0.8 "stp_b08_${BASE}"
+    --run_name "stp_beta${BETA}"
+done

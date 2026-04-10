@@ -172,6 +172,14 @@ def read_options():
                         help='L2 regularization coefficient to previous task global model',
                         type=float,
                         default=0.0)
+    parser.add_argument('--lambda_ewc',
+                        help='EWC regularization coefficient for fedavg_ewc (sequential CL)',
+                        type=float,
+                        default=0.0)
+    parser.add_argument('--ewc_fisher_samples',
+                        help='max local samples per client for diagonal Fisher estimation at task boundary',
+                        type=int,
+                        default=128)
     parser.add_argument('--lambda_s',
                         help='short-term anchor regularization coefficient (to client prev model)',
                         type=float,
@@ -247,6 +255,12 @@ def read_options():
     if len(beta_candidates) == 0:
         beta_candidates = [0.0, 0.25, 0.5, 0.75, 1.0]
     options['beta_candidates'] = beta_candidates
+    options['ewc_fisher_samples'] = int(max(0, int(options.get('ewc_fisher_samples', 128))))
+
+    if options.get('algo', '') != 'fedavg_ewc':
+        options['lambda_ewc'] = 0.0
+    if options.get('algo', '') == 'fedavg_ewc' and (not options.get('sequential_cl', False)):
+        print('Warning[read_options]: fedavg_ewc is designed for --sequential_cl; current run will behave as FedAvg (no EWC state transfer).')
 
     # Set seeds
     np.random.seed(1 + options['seed'])

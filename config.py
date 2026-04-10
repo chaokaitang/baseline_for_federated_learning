@@ -2,6 +2,7 @@
 DATASETS = ['mnist', 'emnist']
 TRAINERS = {
     'fedavg': 'FedAvgTrainer',
+    'fedavg_ewc': 'FedAvgEWCTrainer',
     'fedprox': 'FedProxTrainer',
     'ditto': 'DittoTrainer',
     'pfedme': 'PFedMeTrainer',

@@ -8,14 +8,13 @@ ROUNDS=40
 CLIENTS=50
 EPOCH=1
 LR=0.01
-SEED=0
 
-# 按调参结果改这里
-MU=0.001
-LS=0.01
-LL=0.01
+SEEDS=(0 1 2)
 
-BASE="ablation_${MODEL}_r${ROUNDS}_c${CLIENTS}_lr${LR}_sd${SEED}"
+MU=0
+LO=1.0
+LS=0.001
+LL=0.001
 
 run_stp () {
   python main.py \
@@ -36,23 +35,25 @@ run_stp () {
     --alpha 0.9 \
     --beta_mode fixed \
     --beta_fixed 0.5 \
-    --seed $SEED \
+    --seed "$5" \
     --gpu \
     --task_aware \
-    --run_name "$5"
+    --run_name "$6"
 }
 
-echo "===== Full ====="
-run_stp $MU 0 $LS $LL "stp_full_${BASE}"
+for SEED in "${SEEDS[@]}"
+do
+  BASE="ablation_${MODEL}_r${ROUNDS}_c${CLIENTS}_lr${LR}_sd${SEED}"
 
-echo "===== no mu ====="
-run_stp 0 0 $LS $LL "stp_nom_${BASE}"
+  echo "===== Seed $SEED | no_reg ====="
+  run_stp 0 0 0 0 $SEED "stp_noreg_${BASE}"
 
-echo "===== no short ====="
-run_stp $MU 0 0 $LL "stp_nos_${BASE}"
+  echo "===== Seed $SEED | global_only ====="
+  run_stp 0 $LO 0 0 $SEED "stp_globalonly_${BASE}"
 
-echo "===== no long ====="
-run_stp $MU 0 $LS 0 "stp_nol_${BASE}"
+  echo "===== Seed $SEED | personal_only ====="
+  run_stp 0 0 $LS $LL $SEED "stp_personalonly_${BASE}"
 
-echo "===== old only ====="
-run_stp 0 0.01 0 0 "stp_oldonly_${BASE}"
+  echo "===== Seed $SEED | full ====="
+  run_stp 0 $LO $LS $LL $SEED "stp_full_${BASE}"
+done

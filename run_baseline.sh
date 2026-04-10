@@ -9,19 +9,21 @@ CLIENTS=50
 EPOCH=1
 LR=0.01
 
-# 按调参结果改这三个值
-STP_MU=0.001
-STP_LS=0.01
-STP_LL=0.01
-
 SEEDS=(0 1 2)
+
+# ===== STP 最终参数 =====
+STP_MU=0
+STP_LO=1.0
+STP_LS=0.001
+STP_LL=0.001
 
 for SEED in "${SEEDS[@]}"
 do
-  BASE="dir_t3_a0p3_${MODEL}_r${ROUNDS}_c${CLIENTS}_lr${LR}_sd${SEED}"
+  BASE="baseline_${MODEL}_r${ROUNDS}_c${CLIENTS}_lr${LR}_sd${SEED}"
 
   echo "===== Seed $SEED ====="
 
+  # ===== FedAvg =====
   python main.py \
     --algo fedavg \
     --dataset $DATASET \
@@ -38,11 +40,12 @@ do
     --task_aware \
     --run_name "fedavg_${BASE}"
 
+  # ===== FedProx =====
   python main.py \
     --algo fedprox \
     --dataset $DATASET \
     --model $MODEL \
-    --mu 0.001 \
+    --mu 0.1 \
     --sequential_cl \
     --num_tasks 3 \
     --num_round $ROUNDS \
@@ -53,8 +56,28 @@ do
     --seed $SEED \
     --gpu \
     --task_aware \
-    --run_name "fedprox_mu1e3_${BASE}"
+    --run_name "fedprox_${BASE}"
 
+  # ===== FedAvg + EWC =====
+  python main.py \
+    --algo fedavg_ewc \
+    --dataset $DATASET \
+    --model $MODEL \
+    --sequential_cl \
+    --num_tasks 3 \
+    --num_round $ROUNDS \
+    --clients_per_round $CLIENTS \
+    --num_epoch $EPOCH \
+    --batch_size 32 \
+    --lr $LR \
+    --lambda_ewc 10.0 \
+    --ewc_fisher_samples 128 \
+    --seed $SEED \
+    --gpu \
+    --task_aware \
+    --run_name "fedavg_ewc_${BASE}"
+
+  # ===== Ditto =====
   python main.py \
     --algo ditto \
     --dataset $DATASET \
@@ -71,8 +94,9 @@ do
     --seed $SEED \
     --gpu \
     --task_aware \
-    --run_name "ditto_lp1_${BASE}"
+    --run_name "ditto_${BASE}"
 
+  # ===== STP-FedCL =====
   python main.py \
     --algo stp_fedcl \
     --dataset $DATASET \
@@ -85,7 +109,7 @@ do
     --batch_size 32 \
     --lr $LR \
     --mu $STP_MU \
-    --lambda_old 0 \
+    --lambda_old $STP_LO \
     --lambda_s $STP_LS \
     --lambda_l $STP_LL \
     --alpha 0.9 \
@@ -94,6 +118,5 @@ do
     --seed $SEED \
     --gpu \
     --task_aware \
-    --run_name "stp_full_${BASE}"
-
+    --run_name "stp_${BASE}"
 done

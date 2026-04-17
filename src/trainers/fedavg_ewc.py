@@ -183,7 +183,11 @@ class FedAvgEWCTrainer(BaseTrainer):
                 fisher_diag = self.client_fisher_diag[c.cid].detach().clone()
                 loss_hook = self._build_ewc_loss_hook(prev_anchor, fisher_diag)
 
-            soln, stat = c.local_train(loss_hook=loss_hook)
+            soln, stat = c.local_train(
+                loss_hook=loss_hook,
+                prev_model=self.options.get('prev_model', None),
+                lambda_old=self.options.get('lambda_old', 0.0),
+            )
 
             if self.print_result:
                 print("(global)  Round: {:>2d} | CID: {: >3d} ({:>2d}/{:>2d})| "

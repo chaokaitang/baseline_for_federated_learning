@@ -119,8 +119,8 @@ class Worker(object):
         self.model.train()
         train_loss = train_acc = train_total = 0
         # Optional old-task anchor (sequential CL): L_task + lambda_old * ||w - w_old||^2
-        prev_model = self.options.get('prev_model', None)
-        lambda_old = float(self.options.get('lambda_old', 0.0))
+        prev_model = kwargs.get('prev_model', None)
+        lambda_old = float(kwargs.get('lambda_old', 0.0))
         printed_reg_once = False
         for epoch in range(self.num_epoch):
             train_loss = train_acc = train_total = 0

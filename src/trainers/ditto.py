@@ -104,7 +104,9 @@ class DittoTrainer(BaseTrainer):
                     # Run local training for personalization (prox to current global anchor)
                     soln_personal, local_stats = c.local_train(
                         prox_mu=self.lambda_p,
-                        global_params=global_anchor
+                        global_params=global_anchor,
+                        prev_model=self.options.get('prev_model', None),
+                        lambda_old=self.options.get('lambda_old', 0.0),
                     )
                     _, local_solution = soln_personal
                     if self.print_result:

@@ -495,7 +495,7 @@ def _assign_task_shards(
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Generate EMNIST balanced continual shard non-IID partition.')
-    parser.add_argument('--num_user', type=int, default=100, help='Number of clients')
+    parser.add_argument('--num_user', type=int, default=20, help='Number of clients')
     parser.add_argument('--num_tasks', type=int, default=3, help='Number of continual tasks')
     parser.add_argument('--shards_per_client_per_task', type=int, default=5, help='Target shards per client per task')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
@@ -626,7 +626,7 @@ def main():
     print_distribution_stats(test_label_distribution, test_data['num_samples'], split_name='Test')
 
     image_flag = 1 if args.image_data else 0
-    dataset_tag = f'emnist_balanced_{image_flag}_shard_continual_t{args.num_tasks}_spt{args.shards_per_client_per_task}_niid'
+    dataset_tag = f'emnist_balanced_{image_flag}_shard_continual_t{args.num_tasks}_spt{args.shards_per_client_per_task}_niid_for_{args.num_user}u'
     train_path = os.path.join(cpath, 'data', 'train', f'{dataset_tag}.pkl')
     test_path = os.path.join(cpath, 'data', 'test', f'{dataset_tag}.pkl')
     summary_path = os.path.join(cpath, f'{dataset_tag}_summary.json')

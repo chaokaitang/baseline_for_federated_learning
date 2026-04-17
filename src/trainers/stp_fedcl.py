@@ -59,7 +59,7 @@ class STPFedCLTrainer(BaseTrainer):
     def _flat_params_with_grad(model):
         return torch.cat([p.view(-1) for p in model.parameters()])
 
-    def _build_personal_loss_hook(self, global_model, prev_anchor, ema_anchor, round_i=None, cid=None):
+    def _build_personal_loss_hook(self, prev_anchor, ema_anchor, round_i=None, cid=None):
         step_counter = {'n': 0}
 
         def _hook(worker, base_loss):
@@ -321,6 +321,8 @@ class STPFedCLTrainer(BaseTrainer):
                 selected_clients,
                 prox_mu=self.mu,
                 global_params=global_anchor,
+                prev_model=self.options.get('prev_model', None),
+                lambda_old=self.options.get('lambda_old', 0.0),
             )
             self.metrics.extend_commu_stats(round_i, stats)
             self.latest_model = self.aggregate(solns)
@@ -334,13 +336,16 @@ class STPFedCLTrainer(BaseTrainer):
 
                 prev_anchor = self.client_prev.get(c.cid, personal).detach().clone()
                 ema_anchor = self.client_ema.get(c.cid, personal).detach().clone()
-                loss_hook = self._build_personal_loss_hook(global_anchor,
-                                                           prev_anchor,
+                loss_hook = self._build_personal_loss_hook(prev_anchor,
                                                            ema_anchor,
                                                            round_i=round_i,
                                                            cid=c.cid)
 
-                soln_personal, local_stats = c.local_train(loss_hook=loss_hook)
+                soln_personal, local_stats = c.local_train(
+                    loss_hook=loss_hook,
+                    prev_model=None,
+                    lambda_old=0.0,
+                )
                 _, local_solution = soln_personal
                 if self.print_result:
                     print("(Private) Round: {:>2d} | CID: {: >3d} ({:>2d}/{:>2d})| "

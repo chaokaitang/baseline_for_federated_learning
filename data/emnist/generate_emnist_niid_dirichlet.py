@@ -602,7 +602,7 @@ def create_taskwise_dirichlet_partition(
 
 def main():
     parser = argparse.ArgumentParser(description="Generate EMNIST-balanced task-wise Dirichlet non-IID partition.")
-    parser.add_argument("--num_user", type=int, default=100, help="Number of clients")
+    parser.add_argument("--num_user", type=int, default=20, help="Number of clients")
     parser.add_argument("--num_classes", type=int, default=47, help="Expected number of classes")
     parser.add_argument("--num_tasks", type=int, default=3, help="Number of continual tasks")
     parser.add_argument("--alpha", type=float, default=0.3, help="Dirichlet concentration alpha per task")
@@ -684,7 +684,7 @@ def main():
 
     image_flag = 1 if args.image_data else 0
     a_tag = alpha_tag(args.alpha)
-    dataset_tag = f"emnist_balanced_{image_flag}_dirichlet_t{args.num_tasks}_a{a_tag}_niid"
+    dataset_tag = f"emnist_balanced_{image_flag}_dirichlet_t{args.num_tasks}_a{a_tag}_niid_for_{args.num_user}u"
     train_path = f"{cpath}/data/train/{dataset_tag}.pkl"
     test_path = f"{cpath}/data/test/{dataset_tag}.pkl"
     train_dist_path = f"{cpath}/{dataset_tag}_train_label_distribution.npy"

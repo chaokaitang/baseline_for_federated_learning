@@ -106,7 +106,11 @@ class DAFedCLTrainer(BaseTrainer):
             ema_anchor = self.client_ema.get(c.cid, global_anchor).detach().clone()
             loss_hook = self._build_loss_hook(global_anchor, prev_anchor, ema_anchor)
 
-            soln, stat = c.local_train(loss_hook=loss_hook)
+            soln, stat = c.local_train(
+                loss_hook=loss_hook,
+                prev_model=self.options.get('prev_model', None),
+                lambda_old=self.options.get('lambda_old', 0.0),
+            )
 
             if self.print_result:
                 print("Round: {:>2d} | CID: {: >3d} ({:>2d}/{:>2d})| "

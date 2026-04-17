@@ -1,15 +1,15 @@
 #!/bin/bash
 set -e
-
-DATASET="emnist_balanced_0_dirichlet_t3_a0p3_niid"
+DATASET="emnist_balanced_0_shard_continual_t3_spt5_niid_for_20u"
+# DATASET="emnist_balanced_0_dirichlet_t3_a0p3_niid"
 MODEL="2nn"
 
 ROUNDS=40
-CLIENTS=50
+CLIENTS=20
 EPOCH=1
 LR=0.01
 
-SEEDS=(0 1 2)
+SEEDS=(0)
 
 MU=0
 LO=1.0

@@ -108,7 +108,13 @@ class BaseTrainer(object):
             c.set_flat_model_params(self.latest_model)
 
             # Solve minimization locally (pass through optional kwargs)
-            soln, stat = c.local_train(**kwargs)
+            local_kwargs = dict(kwargs)
+            if 'prev_model' not in local_kwargs:
+                local_kwargs['prev_model'] = self.worker.options.get('prev_model', None)
+            if 'lambda_old' not in local_kwargs:
+                local_kwargs['lambda_old'] = float(self.worker.options.get('lambda_old', 0.0))
+
+            soln, stat = c.local_train(**local_kwargs)
             if self.print_result:
                 print("(global)  Round: {:>2d} | CID: {: >3d} ({:>2d}/{:>2d})| "
                       "Param: norm {:>.4f} ({:>.4f}->{:>.4f})| "

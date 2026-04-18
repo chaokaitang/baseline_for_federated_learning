@@ -8,6 +8,9 @@ from src.models.worker import Worker
 
 class BaseTrainer(object):
     def __init__(self, options, dataset, model=None, optimizer=None, name='', worker=None):
+        # Keep a trainer-level copy of runtime options for subclasses.
+        self.options = options
+
         if model is not None and optimizer is not None:
             self.worker = Worker(model, optimizer, options)
         elif worker is not None:

@@ -1,11 +1,11 @@
 #!/bin/bash
 set -e
-DATASET="emnist_balanced_0_shard_continual_t3_spt5_niid_for_20u"
-# DATASET="emnist_balanced_0_dirichlet_t3_a0p3_niid"
+# DATASET="emnist_balanced_0_shard_continual_t3_spt5_niid_for_20u"
+DATASET="emnist_balanced_0_dirichlet_t3_a0p3_niid"
 MODEL="2nn"
 
 ROUNDS=40
-CLIENTS=20
+CLIENTS=50
 EPOCH=1
 LR=0.01
 
@@ -43,17 +43,37 @@ run_stp () {
 
 for SEED in "${SEEDS[@]}"
 do
-  BASE="ablation_${MODEL}_r${ROUNDS}_c${CLIENTS}_lr${LR}_sd${SEED}"
+  BASE="dirichlet_ablation_${MODEL}_r${ROUNDS}_c${CLIENTS}_lr${LR}_sd${SEED}"
+
+    echo "===== Seed $SEED | global_only ====="
+  run_stp 0 $LO 0 0 $SEED "stp_globalonly_${BASE}"
+
+    echo "===== Seed $SEED | full ====="
+  run_stp 0 $LO $LS $LL $SEED "stp_full_${BASE}"
 
   echo "===== Seed $SEED | no_reg ====="
   run_stp 0 0 0 0 $SEED "stp_noreg_${BASE}"
 
-  echo "===== Seed $SEED | global_only ====="
-  run_stp 0 $LO 0 0 $SEED "stp_globalonly_${BASE}"
 
   echo "===== Seed $SEED | personal_only ====="
   run_stp 0 0 $LS $LL $SEED "stp_personalonly_${BASE}"
 
-  echo "===== Seed $SEED | full ====="
-  run_stp 0 $LO $LS $LL $SEED "stp_full_${BASE}"
+
 done
+
+# for SEED in "${SEEDS[@]}"
+# do
+#   BASE="ablation_${MODEL}_r${ROUNDS}_c${CLIENTS}_lr${LR}_sd${SEED}"
+
+#   echo "===== Seed $SEED | no_reg ====="
+#   run_stp 0 0 0 0 $SEED "stp_noreg_${BASE}"
+
+#   echo "===== Seed $SEED | global_only ====="
+#   run_stp 0 $LO 0 0 $SEED "stp_globalonly_${BASE}"
+
+#   echo "===== Seed $SEED | personal_only ====="
+#   run_stp 0 0 $LS $LL $SEED "stp_personalonly_${BASE}"
+
+#   echo "===== Seed $SEED | full ====="
+#   run_stp 0 $LO $LS $LL $SEED "stp_full_${BASE}"
+# done

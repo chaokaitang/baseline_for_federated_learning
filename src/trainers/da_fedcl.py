@@ -108,8 +108,8 @@ class DAFedCLTrainer(BaseTrainer):
 
             soln, stat = c.local_train(
                 loss_hook=loss_hook,
-                prev_model=self.options.get('prev_model', None),
-                lambda_old=self.options.get('lambda_old', 0.0),
+                prev_model=self.worker.options.get('prev_model', None),
+                lambda_old=self.worker.options.get('lambda_old', 0.0),
             )
 
             if self.print_result:

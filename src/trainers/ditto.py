@@ -105,8 +105,8 @@ class DittoTrainer(BaseTrainer):
                     soln_personal, local_stats = c.local_train(
                         prox_mu=self.lambda_p,
                         global_params=global_anchor,
-                        prev_model=self.options.get('prev_model', None),
-                        lambda_old=self.options.get('lambda_old', 0.0),
+                        prev_model=self.worker.options.get('prev_model', None),
+                        lambda_old=self.worker.options.get('lambda_old', 0.0),
                     )
                     _, local_solution = soln_personal
                     if self.print_result:

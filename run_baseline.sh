@@ -23,40 +23,40 @@ do
 
   echo "===== Seed $SEED ====="
 
-  # # ===== FedAvg =====
-  # python main.py \
-  #   --algo fedavg \
-  #   --dataset $DATASET \
-  #   --model $MODEL \
-  #   --sequential_cl \
-  #   --num_tasks 3 \
-  #   --num_round $ROUNDS \
-  #   --clients_per_round $CLIENTS \
-  #   --num_epoch $EPOCH \
-  #   --batch_size 32 \
-  #   --lr $LR \
-  #   --seed $SEED \
-  #   --gpu \
-  #   --task_aware \
-  #   --run_name "fedavg_${BASE}"
+  # ===== FedAvg =====
+  python main.py \
+    --algo fedavg \
+    --dataset $DATASET \
+    --model $MODEL \
+    --sequential_cl \
+    --num_tasks 3 \
+    --num_round $ROUNDS \
+    --clients_per_round $CLIENTS \
+    --num_epoch $EPOCH \
+    --batch_size 32 \
+    --lr $LR \
+    --seed $SEED \
+    --gpu \
+    --task_aware \
+    --run_name "fedavg_${BASE}"
 
-  # # ===== FedProx =====
-  # python main.py \
-  #   --algo fedprox \
-  #   --dataset $DATASET \
-  #   --model $MODEL \
-  #   --mu 0.1 \
-  #   --sequential_cl \
-  #   --num_tasks 3 \
-  #   --num_round $ROUNDS \
-  #   --clients_per_round $CLIENTS \
-  #   --num_epoch $EPOCH \
-  #   --batch_size 32 \
-  #   --lr $LR \
-  #   --seed $SEED \
-  #   --gpu \
-  #   --task_aware \
-  #   --run_name "fedprox_${BASE}"
+  # ===== FedProx =====
+  python main.py \
+    --algo fedprox \
+    --dataset $DATASET \
+    --model $MODEL \
+    --mu 0.1 \
+    --sequential_cl \
+    --num_tasks 3 \
+    --num_round $ROUNDS \
+    --clients_per_round $CLIENTS \
+    --num_epoch $EPOCH \
+    --batch_size 32 \
+    --lr $LR \
+    --seed $SEED \
+    --gpu \
+    --task_aware \
+    --run_name "fedprox_${BASE}"
 
   # ===== FedAvg + EWC =====
   python main.py \
@@ -96,27 +96,27 @@ do
     --task_aware \
     --run_name "ditto_${BASE}"
 
-  # # ===== STP-FedCL =====
-  # python main.py \
-  #   --algo stp_fedcl \
-  #   --dataset $DATASET \
-  #   --model $MODEL \
-  #   --sequential_cl \
-  #   --num_tasks 3 \
-  #   --num_round $ROUNDS \
-  #   --clients_per_round $CLIENTS \
-  #   --num_epoch $EPOCH \
-  #   --batch_size 32 \
-  #   --lr $LR \
-  #   --mu $STP_MU \
-  #   --lambda_old $STP_LO \
-  #   --lambda_s $STP_LS \
-  #   --lambda_l $STP_LL \
-  #   --alpha 0.9 \
-  #   --beta_mode fixed \
-  #   --beta_fixed 0.4 \
-  #   --seed $SEED \
-  #   --gpu \
-  #   --task_aware \
-  #   --run_name "stp_${BASE}"
+  # ===== STP-FedCL =====
+  python main.py \
+    --algo stp_fedcl \
+    --dataset $DATASET \
+    --model $MODEL \
+    --sequential_cl \
+    --num_tasks 3 \
+    --num_round $ROUNDS \
+    --clients_per_round $CLIENTS \
+    --num_epoch $EPOCH \
+    --batch_size 32 \
+    --lr $LR \
+    --mu $STP_MU \
+    --lambda_old $STP_LO \
+    --lambda_s $STP_LS \
+    --lambda_l $STP_LL \
+    --alpha 0.9 \
+    --beta_mode fixed \
+    --beta_fixed 0.4 \
+    --seed $SEED \
+    --gpu \
+    --task_aware \
+    --run_name "stp_${BASE}"
 done

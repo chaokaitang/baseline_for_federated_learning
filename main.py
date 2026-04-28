@@ -8,6 +8,9 @@ import sys
 import traceback
 import contextlib
 
+# Default to a headless backend for all plotting paths in training scripts.
+os.environ.setdefault('MPLBACKEND', 'Agg')
+
 from src.utils.worker_utils import read_data, MiniDataset
 from config import OPTIMIZERS, DATASETS, MODEL_PARAMS, TRAINERS
 

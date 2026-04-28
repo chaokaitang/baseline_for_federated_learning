@@ -128,29 +128,7 @@ class DittoTrainer(BaseTrainer):
                     self.worker.num_epoch = old_num_epoch
 
             # After personalization updates, evaluate personalized models for ALL clients
-            personal_losses = []
-            personal_accs = []
-            for c_all in self.clients:
-                try:
-                    # load personalized model if exists, otherwise use latest global
-                    p = self.personal_models.get(c_all.cid, self.latest_model)
-                    c_all.set_flat_model_params(p)
-                    tot_correct, num_sample, loss = c_all.local_test(use_eval_data=True)
-                    acc = tot_correct / num_sample if num_sample > 0 else 0.0
-                    avg_loss = float(loss) / float(num_sample) if num_sample > 0 else 0.0
-                    personal_losses.append(avg_loss)
-                    personal_accs.append(float(acc))
-                    # record per-client personalized stat
-                    self.metrics.update_personalized_eval_stats(round_i, c_all.cid, avg_loss, float(acc))
-                    # restore client's model to global for next operations
-                    c_all.set_flat_model_params(self.latest_model)
-                except Exception as e:
-                    # if evaluation fails for a client, skip it
-                    print(f"Warning[DittoTrainer.train]: round={round_i}, cid={c_all.cid}, personalized eval skipped due to {type(e).__name__}: {e}")
-                    continue
-
-            # record aggregated personalized statistics (mean and std)
-            self.metrics.update_personalized_aggregate(round_i, personal_losses, personal_accs)
+            self._evaluate_personalized_all_clients(round_i)
 
             # Learning rate schedule step if any
             try:
@@ -161,6 +139,32 @@ class DittoTrainer(BaseTrainer):
         # Final evaluation
         self.test_latest_model_on_traindata(self.num_round)
         self.test_latest_model_on_evaldata(self.num_round)
+        # Ensure personalized metrics at final index (num_round) are populated too.
+        self._evaluate_personalized_all_clients(self.num_round)
 
         # Save tracked information
         self.metrics.write()
+
+    def _evaluate_personalized_all_clients(self, round_i):
+        personal_losses = []
+        personal_accs = []
+        for c_all in self.clients:
+            try:
+                # Load personalized model if exists, otherwise fallback to latest global.
+                p = self.personal_models.get(c_all.cid, self.latest_model)
+                c_all.set_flat_model_params(p)
+                tot_correct, num_sample, loss = c_all.local_test(use_eval_data=True)
+                acc = tot_correct / num_sample if num_sample > 0 else 0.0
+                avg_loss = float(loss) / float(num_sample) if num_sample > 0 else 0.0
+                personal_losses.append(avg_loss)
+                personal_accs.append(float(acc))
+                self.metrics.update_personalized_eval_stats(round_i, c_all.cid, avg_loss, float(acc))
+                c_all.set_flat_model_params(self.latest_model)
+            except Exception as e:
+                print(
+                    f"Warning[DittoTrainer._evaluate_personalized_all_clients]: "
+                    f"round={round_i}, cid={c_all.cid}, personalized eval skipped due to {type(e).__name__}: {e}"
+                )
+                continue
+
+        self.metrics.update_personalized_aggregate(round_i, personal_losses, personal_accs)

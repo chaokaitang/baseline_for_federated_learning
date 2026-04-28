@@ -16,8 +16,8 @@ LS=0.001
 LL=0.001
 
 DATASETS=(
-  "emnist_balanced_0_dirichlet_t3_a0p3_niid"
-  "emnist_balanced_0_shard_continual_t3_spt5_niid"
+  # "emnist_balanced_0_dirichlet_t3_a0p3_niid"
+  "emnist_balanced_0_shard_continual_t3_spt5_niid.pkl"
 )
 
 for DATASET in "${DATASETS[@]}"

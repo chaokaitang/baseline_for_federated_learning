@@ -16,7 +16,7 @@ LO=1.0
 LS=0.001
 LL=0.001
 
-BETAS=(0.7 0.8 0.9 1.0)
+BETAS=(0.8 0.9 1.0)
 
 for BETA in "${BETAS[@]}"
 do

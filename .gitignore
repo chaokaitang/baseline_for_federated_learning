@@ -10,5 +10,7 @@
 test.sh
 /AGENTS.md
 *.json
+/processing_result
+
 
 

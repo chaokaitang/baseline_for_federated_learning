@@ -1,5 +1,9 @@
 #!/bin/bash
 set -e
+
+# Force a non-GUI matplotlib backend to avoid Tk/Tcl thread teardown crashes.
+export MPLBACKEND=Agg
+
 # DATASET="emnist_balanced_0_shard_continual_t3_spt5_niid_for_20u"
 DATASET="emnist_balanced_0_dirichlet_t3_a0p3_niid"
 MODEL="2nn"
@@ -9,7 +13,7 @@ CLIENTS=50
 EPOCH=1
 LR=0.01
 
-SEEDS=(0)
+SEEDS=(2)
 
 # ===== STP 最终参数 =====
 STP_MU=0
